@@ -39,8 +39,8 @@ set -euo pipefail
 #   ./ree.sh --model-name Qwen/Qwen3-8B --prompt-file prompts.jsonl --max-new-tokens 50
 #   ./ree.sh verify --receipt-path ~/.cache/gensyn/.../metadata/receipt_123.json
 #
-# See the gensyn-sdk documentation for more detailed usage options.
-#
+# See the gensyn-sdk documentation for more detailed usage options:
+#   https://docs.gensyn.ai/tech/ree
 
 IMAGE_REMOTE="gensynai/ree:v0.1.0"
 IMAGE_LOCAL="ree"

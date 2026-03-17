@@ -19,7 +19,7 @@ By downloading, pulling, installing, accessing, or using the proprietary REE bin
 To get started with REE, please first ensure you have installed and configured Docker for your system. Note that if you are using Docker Desktop, you may need to [adjust the memory limit](https://docs.docker.com/desktop/settings-and-maintenance/settings/#advanced). Then, clone this repository:
 
 ```
-git clone git@github.com:gensyn-ai/ree.git
+git clone https://github.com/gensyn-ai/ree.git
 cd ree
 ```
 
@@ -44,7 +44,7 @@ Note that the `Prompt Text` and `Prompt File` fields are mutually exclusive.
 
 Once REE is running, you will be presented with a TUI that allows you to select a model, provide a prompt, and run inference. The TUI will guide you through the process and provide options for configuring the inference run. After the run is complete, REE will generate a receipt that contains all of the information about the run, including the model used, the prompt, the output, and all of the metadata needed to reproduce the run. The `Model Name` refers to a HuggingFace model identifier, such as `Qwen/Qwen3-8B`. The `Prompt` is the text input that you want to provide to the model for inference. You can either type this directly into the TUI or provide a file containing the prompt.
 
-For a list of available models, please see our [documentation](https://docs.gensyn.ai/tech/ree). Note that this list is non-exhaustive: any HuggingFace model that is compatible with our system may be used. If you have a specific model in mind that is not on our list, please file an issue and we will do our best to support it.
+For a list of available models, please see our [documentation](https://docs.gensyn.ai/tech/ree/supported-models). Note that this list is non-exhaustive: any HuggingFace model that is compatible with our system may be used. If you have a specific model in mind that is not on our list, please file an issue and we will do our best to support it.
 
 ### Receipts
 
