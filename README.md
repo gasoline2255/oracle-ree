@@ -14,9 +14,30 @@ The REE compiler binary and the REE reproducible-operators binary, as included i
 By downloading, pulling, installing, accessing, or using the proprietary REE binaries or any Docker image or release artifact containing them, you agree to the REE Binary License Agreement.
 
 
+# Requirements
+
+## CUDA Driver (GPU execution)
+
+GPU-accelerated inference requires a sufficiently recent NVIDIA driver. The minimum supported versions are:
+
+| Platform | Minimum driver version |
+|---|---|
+| Linux | 570.00 |
+| Windows | 572.16 |
+
+To check your installed driver version, run `nvidia-smi`. If your driver is older than the minimum, please update it from the [NVIDIA Driver Downloads](https://www.nvidia.com/Download/index.aspx) page before running REE.
+
+> **CPU-only fallback:** If no compatible GPU or driver is present, REE can run in CPU-only mode by passing `--cpu-only` to `ree.sh`. Expect significantly slower inference.
+
+## Docker
+
+REE runs inside a Docker container. Please install and configure Docker for your system before proceeding.
+
+> **Docker Desktop memory limit:** Docker Desktop defaults to 8 GB of memory, which may not be enough for larger models. If you encounter exit code 137 (out of memory) errors, increase the memory allocation to accommodate your model size under [Docker Desktop > Settings > Resources > Advanced > Memory](https://docs.docker.com/desktop/settings-and-maintenance/settings/#advanced).
+
 # Getting Started
 
-To get started with REE, please first ensure you have installed and configured Docker for your system. Note that if you are using Docker Desktop, you may need to [adjust the memory limit](https://docs.docker.com/desktop/settings-and-maintenance/settings/#advanced). Then, clone this repository:
+To get started with REE, clone this repository:
 
 ```
 git clone https://github.com/gensyn-ai/ree.git

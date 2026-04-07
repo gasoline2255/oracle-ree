@@ -48,6 +48,7 @@ import textwrap
 import threading
 import time
 import traceback
+import unicodedata
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -93,6 +94,14 @@ class PhaseInfo:
     label: str | None = None
 
 
+@dataclass(frozen=True)
+class HelpCommand:
+    key: str
+    label: str
+    disabled_while_running: bool = False
+    disabled_while_not_running: bool = False
+
+
 PHASES = (
     PhaseInfo(Phase.PULL_START, 0.05, "Pull image"),
     PhaseInfo(Phase.PULL_DONE, 0.25),
@@ -116,6 +125,14 @@ SUBCOMMAND_OPTIONS = [
     "validate",
     "verify",
 ]
+
+HELP_COMMANDS = (
+    HelpCommand("q", "quit"),
+    HelpCommand("r", "run", disabled_while_running=True),
+    HelpCommand("c", "cancel", disabled_while_not_running=True),
+    HelpCommand("e", "reset run state", disabled_while_running=True),
+    HelpCommand("l", "license"),
+)
 
 
 @dataclass
@@ -159,6 +176,12 @@ class ReeTUI:
                 "Hint: use a JSONLines file with one prompt per line, either as a string or object with a 'prompt' field.",
             ),
             Field("max_new_tokens", "Max New Tokens", "50"),
+            Field(
+                "n_partitions",
+                "Partitions",
+                "1",
+                "Hint: set > 1 to split the model for pipeline-parallel inference.",
+            ),
             Field("receipt_path", "Receipt Path", ""),
             Field("extra_args", "Extra Args", ""),
         ]
@@ -318,6 +341,47 @@ class ReeTUI:
         if len(self.logs) > self.max_logs:
             self.logs = self.logs[-self.max_logs :]
 
+    def strike_text(self, text: str) -> str:
+        return "".join(f"{char}\u0336" for char in text)
+
+    def display_width(self, text: str) -> int:
+        return sum(0 if unicodedata.combining(char) else 1 for char in text)
+
+    def draw_help(self, stdscr: curses.window, y: int, width: int) -> None:
+        dim_attr = curses.A_DIM
+        strike_attr = dim_attr | getattr(curses, "A_STRIKEOUT", 0)
+        segments: list[tuple[str, int]] = []
+        is_running = self.mode == Mode.RUNNING
+        for index, command in enumerate(HELP_COMMANDS):
+            text = f"{command.key} {command.label}"
+            is_disabled = (
+                command.disabled_while_running
+                and is_running
+                or command.disabled_while_not_running
+                and not is_running
+            )
+            if is_disabled:
+                if getattr(curses, "A_STRIKEOUT", 0) == 0:
+                    text = self.strike_text(text)
+                attr = strike_attr
+            else:
+                attr = dim_attr
+            segments.append((text, attr))
+            if index < len(HELP_COMMANDS) - 1:
+                segments.append((" | ", dim_attr))
+
+        x = 1
+        max_x = max(1, width - 1)
+        for text, attr in segments:
+            if x >= max_x:
+                break
+            remaining = max_x - x
+            try:
+                stdscr.addstr(y, x, text[:remaining], attr)
+            except curses.error:
+                break
+            x += min(self.display_width(text), remaining)
+
     def build_args(self) -> list[str]:
         args: list[str] = []
         subcommand = self.field("subcommand") or "run"
@@ -344,6 +408,10 @@ class ReeTUI:
             if max_new_tokens:
                 args.extend(["--max-new-tokens", max_new_tokens])
 
+            n_partitions = self.field("n_partitions")
+            if n_partitions and n_partitions != "1":
+                args.extend(["--n-partitions", n_partitions])
+
         extra = self.field("extra_args")
         if extra:
             args.extend(shlex.split(extra))
@@ -362,6 +430,7 @@ class ReeTUI:
                     "prompt_text",
                     "prompt_file",
                     "max_new_tokens",
+                    "n_partitions",
                     "extra_args",
                 ]
             )
@@ -851,7 +920,12 @@ class ReeTUI:
                                             nc = win.getch()
                                             if nc == ord("["):
                                                 rest = [win.getch() for _ in range(4)]
-                                                if rest == [ord("2"), ord("0"), ord("1"), ord("~")]:
+                                                if rest == [
+                                                    ord("2"),
+                                                    ord("0"),
+                                                    ord("1"),
+                                                    ord("~"),
+                                                ]:
                                                     break
                                                 for rc in [pc, nc] + rest:
                                                     if 32 <= rc <= 126:
@@ -1014,8 +1088,7 @@ class ReeTUI:
             for i, line in enumerate(tail):
                 stdscr.addstr(logs_y + 1 + i, 1, line[: w - 2], self.log_attr(line))
 
-        help_text = "q quit | r run | c cancel | e reset run state | l license"
-        stdscr.addstr(h - 1, 1, help_text[: w - 2], curses.A_DIM)
+        self.draw_help(stdscr, h - 1, w)
         stdscr.refresh()
 
     def handle_key(self, stdscr: curses.window, key: int) -> bool:
