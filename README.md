@@ -88,3 +88,12 @@ The `run` subcommand will, as the name suggests, run a single inference workload
 The `verify` subcommand takes as input a receipt file and will then invoke REE to verify that the receipt is valid. This is useful for users who have received a receipt from another user and want to verify it, or for users who have generated a receipt and want to verify it before sharing it with others.
 
 The `validate` subcommand validates that a given receipt is properly structured and internally consistent (i.e., the hashes given in the receipt match the actual hashes of the contents). This is a less stringent check than `verify`, which actually re-runs the inference and checks that the output matches the receipt, and is useful for users who want to check that a receipt is well-formed before attempting to verify it. Note that `verify` will automatically perform validation as part of its process.
+
+# Patch Notes
+
+20 April 2026
+
+- Updated REE image to v0.2.0.
+- Reproducible performance overhead reduced by 3x.
+- Deterministic and non-deterministic (default) performance overhead reduced by 1.5-2x.
+- Implemented pipeline parallelism to enable larger models (up to 72B). Available via the `--n-partitions` flag in REE.
