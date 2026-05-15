@@ -91,7 +91,14 @@ The `validate` subcommand validates that a given receipt is properly structured 
 
 # Patch Notes
 
-20 April 2026
+## 15 May 2026
+
+- Updated REE image to v0.3.0.
+- REE SDK now supports (basic) tool calls.
+- REE SDK now has an `InferenceSession` class capable of managing the entire lifecycle of an inference session, including setup, execution, and teardown. This allows users to run multiple inference sessions within the same container instance, without needing to re-run setup steps or re-instantiate the compiler.
+- Compile-time overhead reduced by 50% for most models.
+
+## 20 April 2026
 
 - Updated REE image to v0.2.0.
 - Reproducible performance overhead reduced by 3x.
