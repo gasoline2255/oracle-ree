@@ -111,14 +111,127 @@ def extract_market_id(input_str: str) -> str:
     match = re.search(r"0x[a-fA-F0-9]{40}(?![a-fA-F0-9])", input_str)
     if match:
         return match.group(0)
-    # UUID format with hyphens
+
+    # Delphi URL with UUID — search all markets to find the 0x ID
     uuid_match = re.search(
         r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
         input_str
     )
     if uuid_match:
-        return uuid_match.group(0)
-    raise ValueError(f"Could not extract market ID from: {input_str}")
+        uuid = uuid_match.group(0)
+        print(f"[oracle] UUID detected: {uuid} — searching Delphi for 0x ID...")
+        ox_id = resolve_uuid_to_market_id(uuid, input_str)
+        if ox_id:
+            return ox_id
+        raise ValueError(
+            f"Could not resolve UUID {uuid} to a Delphi market ID.\n"
+            f"Please use the 0x market ID directly from the Delphi API."
+        )
+
+    # Raw settlement prompt — use Groq to identify the market
+    if len(input_str) > 50 and GROQ_API_KEY:
+        print("[oracle] Raw settlement prompt detected — searching Delphi markets...")
+        ox_id = resolve_prompt_to_market_id(input_str)
+        if ox_id:
+            return ox_id
+
+    raise ValueError(f"Could not extract market ID from: {input_str[:100]}")
+
+
+def resolve_uuid_to_market_id(uuid: str, original_url: str) -> Optional[str]:
+    """Search Delphi API markets to find the 0x ID matching a UUID URL."""
+    api_key = os.environ.get("DELPHI_API_ACCESS_KEY", "")
+    if not api_key:
+        return None
+    try:
+        # Search across all statuses
+        for status in ["open", "settled", "expired"]:
+            r = requests.get(
+                f"https://api.delphi.fyi/markets",
+                headers={"x-api-key": api_key},
+                params={"limit": 100, "status": status},
+                timeout=15,
+            )
+            if not r.ok:
+                continue
+            markets = r.json().get("markets", [])
+            # Try to match by fetching the Delphi page and comparing
+            for m in markets:
+                mid = m.get("id", "")
+                # Check if the market metadata URL contains our UUID
+                metadata_uri = m.get("metadataUri", "")
+                if uuid.replace("-", "") in metadata_uri.replace("-", ""):
+                    print(f"[oracle] Resolved UUID → {mid}")
+                    return mid
+        # Fallback: fetch the Delphi page and look for market question,
+        # then search the API for that question
+        if original_url.startswith("http"):
+            try:
+                resp = requests.get(
+                    original_url,
+                    headers={"User-Agent": "Mozilla/5.0 OracleREE/1.0"},
+                    timeout=10,
+                )
+                # Extract question from page title or og:title meta tag
+                title_match = re.search(
+                    r'<title[^>]*>([^<]+)</title>|"og:title"[^"]*"([^"]+)"',
+                    resp.text
+                )
+                if title_match:
+                    question = (title_match.group(1) or title_match.group(2) or "").strip()
+                    question = re.sub(r"\s*[-|]\s*Delphi.*$", "", question).strip()
+                    if question and len(question) > 10:
+                        print(f"[oracle] Found question from page: {question[:60]}")
+                        ox_id = resolve_prompt_to_market_id(question)
+                        if ox_id:
+                            return ox_id
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"[oracle] UUID resolution failed: {e}")
+    return None
+
+
+def resolve_prompt_to_market_id(prompt: str) -> Optional[str]:
+    """Search Delphi markets to find one matching a raw settlement prompt."""
+    api_key = os.environ.get("DELPHI_API_ACCESS_KEY", "")
+    if not api_key:
+        return None
+    try:
+        # Extract question from prompt
+        question = ""
+        for line in prompt.splitlines():
+            if "QUESTION:" in line.upper():
+                question = line.split(":", 1)[1].strip()
+                break
+        if not question:
+            # Use first meaningful line
+            for line in prompt.splitlines():
+                if len(line.strip()) > 20:
+                    question = line.strip()[:100]
+                    break
+
+        print(f"[oracle] Searching for market: {question[:60]}")
+
+        for status in ["open", "settled", "expired"]:
+            r = requests.get(
+                "https://api.delphi.fyi/markets",
+                headers={"x-api-key": api_key},
+                params={"limit": 100, "status": status},
+                timeout=15,
+            )
+            if not r.ok:
+                continue
+            markets = r.json().get("markets", [])
+            for m in markets:
+                mq = m.get("metadata", {}).get("question", "").lower()
+                if question.lower()[:40] in mq or mq[:40] in question.lower():
+                    mid = m.get("id", "")
+                    print(f"[oracle] Matched market: {mid} — {mq[:60]}")
+                    return mid
+    except Exception as e:
+        print(f"[oracle] Prompt resolution failed: {e}")
+    return None
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -205,21 +318,100 @@ def fetch_crypto_price(symbol: str, date_str: str) -> dict:
     except Exception as e:
         return {"error": str(e), "symbol": symbol, "date": date_str}
 
-def fetch_web_snapshot(url: str) -> dict:
-    print(f"[oracle] Fetching web source: {url}")
+# Known source name → base URL
+SOURCE_BASE_URLS = {
+    "espn":           "https://www.espn.com",
+    "espncricinfo":   "https://www.espncricinfo.com",
+    "cricinfo":       "https://www.espncricinfo.com",
+    "x":              "https://twitter.com",
+    "twitter":        "https://twitter.com",
+    "coinmarketcap":  "https://coinmarketcap.com",
+    "cmc":            "https://coinmarketcap.com",
+    "coingecko":      "https://www.coingecko.com",
+    "uefa":           "https://www.uefa.com",
+    "nba":            "https://www.nba.com",
+    "nfl":            "https://www.nfl.com",
+    "ipl":            "https://www.iplt20.com",
+    "bbc":            "https://www.bbc.com/sport",
+    "sky sports":     "https://www.skysports.com",
+    "bloomberg":      "https://www.bloomberg.com",
+    "reuters":        "https://www.reuters.com",
+    "cnn":            "https://www.cnn.com",
+    "wikipedia":      "https://www.wikipedia.org",
+    "cricket":        "https://www.espncricinfo.com",
+    "psa":            "https://www.psacard.com",
+    "yahoo finance":  "https://finance.yahoo.com",
+    "yahoo":          "https://finance.yahoo.com",
+    "binance":        "https://www.binance.com",
+}
+
+def resolve_source_url(source: str, question: str, close_time: str) -> str:
+    """Resolve a plain text source label to a specific URL for this market."""
+    src_lower = source.lower().strip()
+
+    # Already a valid URL — use as-is
+    if src_lower.startswith("http"):
+        return source
+
+    # Find base URL from known sources
+    base = None
+    for key, url in SOURCE_BASE_URLS.items():
+        if key in src_lower:
+            base = url
+            break
+    if not base:
+        base = f"https://{source.strip()}"
+
+    # Use Groq to find the specific page for this exact market question
+    if not GROQ_API_KEY:
+        return base
+
+    print(f"[oracle] Resolving URL for '{source}' via Groq...")
+    raw = call_groq(
+        "You are a URL resolver for prediction market settlement. "
+        "Given a data source name and a market question, return the single most "
+        "relevant URL that would contain the official result. "
+        "Return ONLY the full URL, nothing else. No markdown, no explanation.",
+        f"Data source: {source}\n"
+        f"Base URL: {base}\n"
+        f"Market question: {question}\n"
+        f"Close time: {close_time}\n"
+        f"Return the most specific URL on {base} that contains the official result."
+    )
+    if raw:
+        resolved = raw.strip().strip('"').strip("'").split()[0]
+        if resolved.startswith("http"):
+            print(f"[oracle] Resolved '{source}' → {resolved}")
+            return resolved
+
+    return base
+
+
+def fetch_web_snapshot(url: str, question: str = "", close_time: str = "") -> dict:
+    """Fetch a web source, resolving plain text labels to real URLs first."""
+    resolved = resolve_source_url(url, question, close_time)
+    print(f"[oracle] Fetching web source: {resolved}")
     try:
         r = requests.get(
-            url,
+            resolved,
             headers={"User-Agent": "Mozilla/5.0 OracleREE/1.0"},
             timeout=15,
         )
         return {
-            "url": url, "status_code": r.status_code,
+            "url": resolved,
+            "original_source": url,
+            "status_code": r.status_code,
             "text_snippet": r.text[:5000],
-            "sha256": sha256(r.text), "fetched_at": now_iso(),
+            "sha256": sha256(r.text),
+            "fetched_at": now_iso(),
         }
     except Exception as e:
-        return {"url": url, "error": str(e), "fetched_at": now_iso()}
+        return {
+            "url": resolved,
+            "original_source": url,
+            "error": str(e),
+            "fetched_at": now_iso(),
+        }
 
 def call_groq(system_prompt: str, user_prompt: str) -> Optional[str]:
     if not GROQ_API_KEY:
@@ -251,11 +443,12 @@ def classify_market(question: str, prompt_context: str) -> dict:
     system = (
         "You are an oracle classifier. Return ONLY valid JSON, no markdown.\n"
         "market_type: crypto_price | crypto_price_range | sports | politics | event | unknown\n"
-        "is_price_based: true only if asking about a specific asset price vs threshold."
+        "is_price_based: true only if asking about a specific asset price vs threshold.\n"
+        "asset: use the SHORT ticker symbol only (BTC, ETH, SOL, etc) never full name."
     )
     user = (
         f"Question: {question}\nPrompt: {prompt_context}\n"
-        "Return JSON: market_type, is_price_based, asset (ticker or null), "
+        "Return JSON: market_type, is_price_based, asset (short ticker like ETH not Ethereum), "
         "threshold (number or null), capture_date (YYYY-MM-DD or null), confidence"
     )
     raw = call_groq(system, user)
@@ -339,9 +532,9 @@ def build_oracle_evidence(market: dict) -> dict:
             print(f"[oracle] Price verdict: {evidence['price_verdict']}")
     else:
         for src_url in data_sources[:3]:
-            if not src_url.startswith("http"):
-                src_url = f"https://{src_url}"
-            evidence["data_sources"].append(fetch_web_snapshot(src_url))
+            evidence["data_sources"].append(
+                fetch_web_snapshot(src_url, question, resolves_at)
+            )
 
         web_context = "\n\n---\n\n".join(
             f"[{s['url']}]\n{s.get('text_snippet', '')}"
