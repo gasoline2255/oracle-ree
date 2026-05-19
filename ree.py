@@ -2,6 +2,7 @@
 """
 OracleREE TUI — Trustless oracle grounding for Gensyn Delphi settlement.
 Run: python3 ree.py
+Version: strict preflight guard — no dashboard until URL + prompt verify
 """
 
 from __future__ import annotations
@@ -129,13 +130,23 @@ def run_setup(stdscr: curses.window) -> None:
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
 def extract_market_id(s: str) -> Optional[str]:
-    m = re.search(r"0x[a-fA-F0-9]{40}(?![a-fA-F0-9])", s)
+    # Prefer the real Delphi API market address. UUIDs from app.delphi.fyi URLs
+    # are not valid for /markets/{id}; they must be resolved first.
+    m = re.search(r"0x[a-fA-F0-9]{38,42}(?![a-fA-F0-9])", s)
     if m:
         return m.group(0)
     u = re.search(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", s)
     if u:
         return u.group(0)
     return None
+
+def extract_0x_market_id(s: str) -> Optional[str]:
+    m = re.search(r"0x[a-fA-F0-9]{38,42}(?![a-fA-F0-9])", s or "")
+    return m.group(0) if m else None
+
+def extract_uuid(s: str) -> Optional[str]:
+    u = re.search(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", s or "", re.I)
+    return u.group(0) if u else None
 
 def fetch_market_info(market_id: str) -> Optional[dict]:
     try:
@@ -151,6 +162,106 @@ def fetch_market_info(market_id: str) -> Optional[dict]:
     except Exception:
         pass
     return None
+
+
+def normalize_prompt_text(text: str) -> str:
+    """Normalize prompt text for integrity comparison.
+
+    This is intentionally strict enough to catch threshold/rule edits, while
+    ignoring harmless whitespace and label/casing differences.
+    """
+    text = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"\s+", " ", text).strip().lower()
+    return text
+
+
+def extract_question_from_prompt_text(text: str) -> str:
+    """Best-effort question extraction from a pasted settlement prompt.
+
+    Some Delphi prompts do not contain an explicit QUESTION: block. In that case
+    avoid returning generic instruction lines like "You are a prediction market
+    judge" because that creates false mismatches during preflight.
+    """
+    text = text or ""
+    m = re.search(
+        r"QUESTION\s*:\s*(.+?)(?:\n\s*\n|DATA SOURCES\s*:|SETTLEMENT RULES\s*:|VALID OUTCOMES|$)",
+        text,
+        re.I | re.S,
+    )
+    if m:
+        return " ".join(m.group(1).split())
+
+    # Fallback for simpler sports/event prompts. Prefer the line that actually
+    # describes settlement, not the generic judge instruction.
+    preferred: list[str] = []
+    generic_prefixes = (
+        "settlement prompt", "market url", "valid outcomes", "you are",
+        "your task", "output exactly", "web page data", "source:",
+    )
+    for line in text.splitlines():
+        line = line.strip()
+        low = line.lower()
+        if len(line) <= 25 or low.startswith(generic_prefixes):
+            continue
+        if any(k in low for k in ["settle based", "official result", "match between", "will ", "who "]):
+            preferred.append(line)
+
+    if preferred:
+        return " ".join(preferred[0].split())
+    return ""
+
+
+def text_similarity(a: str, b: str) -> float:
+    """Small dependency-free token similarity for preflight guardrails."""
+    aw = set(re.findall(r"[a-z0-9]+", (a or "").lower()))
+    bw = set(re.findall(r"[a-z0-9]+", (b or "").lower()))
+    if not aw or not bw:
+        return 0.0
+    return len(aw & bw) / max(1, len(aw | bw))
+
+
+def prompt_belongs_to_market(prompt: str, official_question: str, outcomes: list) -> tuple[bool, str]:
+    """Return whether a pasted prompt appears to belong to the selected market.
+
+    Strict exact prompt comparison is still handled separately. This check only
+    prevents obviously wrong URL + prompt pairs from opening the dashboard.
+    It avoids false negatives for prompts that do not contain QUESTION: and only
+    describe a sports/event settlement in natural language.
+    """
+    prompt = prompt or ""
+    official_question = official_question or ""
+    pasted_question = extract_question_from_prompt_text(prompt)
+
+    if not official_question:
+        return True, "no official question available"
+
+    if pasted_question:
+        sim = text_similarity(official_question, pasted_question)
+        # Explicit QUESTION: blocks should be reasonably close. Natural-language
+        # event prompts can be shorter/different, so allow a lower threshold when
+        # the prompt lacks an explicit QUESTION: label.
+        has_explicit_question = bool(re.search(r"QUESTION\s*:", prompt, re.I))
+        threshold = 0.72 if has_explicit_question else 0.18
+        if sim >= threshold:
+            return True, f"question similarity {sim:.2f}"
+
+    # Secondary guard: if most non-generic outcomes are present in the prompt,
+    # it is very likely the prompt belongs to the same market even if the wording
+    # differs. This handles sports markets like Team A / Draw / Team B.
+    prompt_l = prompt.lower()
+    meaningful = []
+    for o in outcomes or []:
+        ov = str(o or "").strip()
+        if not ov or ov.lower() in {"yes", "no", "draw"}:
+            continue
+        meaningful.append(ov)
+    if meaningful:
+        hits = sum(1 for o in meaningful if o.lower() in prompt_l)
+        if hits >= max(1, min(2, len(meaningful))):
+            return True, f"outcome name match {hits}/{len(meaningful)}"
+
+    return False, "question/outcomes do not match selected market"
+
 
 def wrap_text(text: str, width: int) -> list[str]:
     lines = []
@@ -174,6 +285,31 @@ def compact_value(value: str, max_len: int) -> str:
     left = max(4, keep // 2)
     right = max(4, keep - left)
     return value[:left] + "..." + value[-right:]
+
+
+def market_0x_id_from_market(market: dict) -> str:
+    """Extract the real Delphi 0x market id from any market payload shape."""
+    if not isinstance(market, dict):
+        return ""
+    candidates = [
+        market.get("id"),
+        market.get("marketId"),
+        market.get("market_id"),
+        market.get("address"),
+        market.get("marketAddress"),
+        market.get("contractAddress"),
+    ]
+    for val in candidates:
+        mid = extract_0x_market_id(str(val or ""))
+        if mid:
+            return mid
+    # Last-resort scan of full JSON. This prevents accidentally passing app UUIDs
+    # to oracle_ree.py when Delphi returns a slightly different object shape.
+    try:
+        mid = extract_0x_market_id(json.dumps(market))
+        return mid or ""
+    except Exception:
+        return ""
 
 # ─── TUI ─────────────────────────────────────────────────────────────────────
 
@@ -200,6 +336,10 @@ class TUI:
 
     def __init__(self) -> None:
         self.market_input = ""
+        self.settlement_prompt_input = ""
+        self.market_ref_input = ""
+        self.preflight_market_id = ""
+        self.active_input_field = "prompt"  # prompt | market
         self.screen = "input"       # input | results
         self.mode = "idle"          # idle | editing | running | done
         self.status = "Ready"
@@ -219,11 +359,27 @@ class TUI:
         self.finished_at: Optional[float] = None
         self.ree_receipt_path: str = ""
         self._input_active = True
+        # Values parsed from oracle_ree.py stdout. This keeps the dashboard useful
+        # even when the user pasted a Delphi URL/UUID or full settlement prompt
+        # and the TUI itself cannot resolve metadata before oracle_ree.py does.
+        self.resolved_market_id: str = ""
+        self.resolved_question: str = ""
+        self.resolved_delphi_model: str = ""
+        self.resolved_ree_model: str = ""
+        self.resolved_classification: str = ""
+        self.oracle_result: str = ""
+        self.prompt_source: str = ""
+        self.prompt_match: str = ""
+        self.question_match: str = ""
+        self.verification_mode: str = ""
+        self.prompt_warning: str = ""
+        self.official_prompt_hash: str = ""
+        self.provided_prompt_hash: str = ""
 
     # ── market fetch (background) ──────────────────────────────────────────
 
-    def trigger_fetch(self) -> None:
-        mid = extract_market_id(self.market_input)
+    def trigger_fetch_for_id(self, mid: str) -> None:
+        """Fetch Delphi metadata for an already-resolved 0x market ID."""
         if not mid or mid == self.last_fetched_id:
             return
         self.last_fetched_id = mid
@@ -236,15 +392,226 @@ class TUI:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def trigger_fetch(self) -> None:
+        # Only the 0x address works with Delphi API. Do not fetch UUID directly.
+        mid = extract_0x_market_id(self.market_ref_input) or extract_0x_market_id(self.market_input) or extract_0x_market_id(self.resolved_market_id)
+        if mid:
+            self.trigger_fetch_for_id(mid)
+
     # ── run ───────────────────────────────────────────────────────────────
+
+    def backend_market_argument(self) -> str:
+        """Return the safest argument to pass to oracle_ree.py.
+
+        app.delphi.fyi URLs contain a UUID. The Delphi API usually needs the
+        0x market address. If the user pasted only the UUID, pass the canonical
+        Delphi URL so oracle_ree.py can resolve the page/question instead of
+        failing against /markets/{uuid}.
+        """
+        # Canonical mode now requires both fields:
+        # 1) user-provided settlement prompt
+        # 2) Delphi Market URL / 0x Market ID
+        # We pass both together so oracle_ree.py can anchor to the real market
+        # while still comparing the pasted prompt against Delphi's canonical prompt.
+        prompt = self.settlement_prompt_input.strip()
+        market_ref = self.market_ref_input.strip()
+
+        # IMPORTANT: after preflight, always pass the resolved 0x market ID
+        # to oracle_ree.py. Passing the app UUID again can fail inside the
+        # backend resolver and incorrectly open the failed dashboard.
+        if market_ref:
+            canonical_ref = self.preflight_market_id or self.resolved_market_id or extract_0x_market_id(market_ref) or market_ref
+            if not extract_0x_market_id(canonical_ref):
+                uuid = extract_uuid(canonical_ref)
+                if uuid and canonical_ref.lower() == uuid.lower():
+                    canonical_ref = f"https://app.delphi.fyi/market/{uuid}"
+        else:
+            canonical_ref = ""
+
+        if prompt and canonical_ref:
+            return (
+                "MARKET URL / MARKET ID:\n"
+                f"{canonical_ref}\n\n"
+                "SETTLEMENT PROMPT:\n"
+                f"{prompt}"
+            )
+
+        # Fallback for old saved state / backwards compatibility.
+        raw = self.market_input.strip()
+        if extract_0x_market_id(raw):
+            return extract_0x_market_id(raw) or raw
+        uuid = extract_uuid(raw)
+        if uuid and raw.lower() == uuid.lower():
+            return f"https://app.delphi.fyi/market/{uuid}"
+        return raw
+
+    def fetch_market_by_ref_for_preflight(self, market_ref: str) -> tuple[Optional[dict], str]:
+        """Resolve Market URL / UUID / 0x ID before switching to dashboard.
+
+        Returns (market, error). This prevents the UI from showing the proof
+        dashboard for obviously wrong URLs or mismatched prompts.
+        """
+        market_ref = (market_ref or "").strip()
+        if not market_ref:
+            return None, "Market URL or 0x Market ID is required"
+
+        # Direct 0x market ID path.
+        mid = extract_0x_market_id(market_ref)
+        if mid:
+            data = fetch_market_info(mid)
+            if data:
+                return data, ""
+            return None, f"Could not fetch Delphi market for ID: {mid}"
+
+        # Delphi app URL / UUID path.
+        uuid = extract_uuid(market_ref)
+        if not uuid:
+            return None, "Market reference must contain a Delphi URL, UUID, or 0x market ID"
+
+        api_key = os.environ.get("DELPHI_API_ACCESS_KEY", "")
+        if not api_key:
+            return None, "DELPHI_API_ACCESS_KEY is missing"
+
+        # Try to fetch the Delphi page and get the visible market question.
+        page_question = ""
+        url = market_ref if market_ref.startswith("http") else f"https://app.delphi.fyi/market/{uuid}"
+        try:
+            import requests
+            resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0 OracleREE/1.0"}, timeout=10)
+            html = resp.text or ""
+            title_match = re.search(r'<title[^>]*>([^<]+)</title>|"og:title"[^>]*content="([^"]+)"', html, re.I)
+            if title_match:
+                page_question = (title_match.group(1) or title_match.group(2) or "").strip()
+                page_question = re.sub(r"\s*[-|]\s*Delphi.*$", "", page_question).strip()
+        except Exception:
+            pass
+
+        # Search current Delphi API pages by extracted question.
+        try:
+            import requests
+            candidates: list[dict] = []
+            for status in ["open", "settled", "expired"]:
+                r = requests.get(
+                    "https://api.delphi.fyi/markets",
+                    headers={"x-api-key": api_key},
+                    params={"limit": 100, "status": status},
+                    timeout=15,
+                )
+                if not r.ok:
+                    continue
+                for m in r.json().get("markets", []):
+                    meta = m.get("metadata") or {}
+                    q = meta.get("question", "") or m.get("question", "") or ""
+                    # Prefer explicit metadata URI UUID match if Delphi provides it.
+                    metadata_uri = str(m.get("metadataUri", ""))
+                    if uuid.replace("-", "") in metadata_uri.replace("-", ""):
+                        return m, ""
+                    if page_question and text_similarity(page_question, q) >= 0.72:
+                        candidates.append(m)
+            if len(candidates) == 1:
+                return candidates[0], ""
+            if len(candidates) > 1:
+                return None, "Multiple similar Delphi markets found. Use the exact 0x market ID."
+        except Exception as exc:
+            return None, f"Market lookup failed: {exc}"
+
+        return None, f"Could not resolve Delphi URL/UUID: {uuid}"
+
+    def validate_inputs_before_run(self) -> tuple[bool, str]:
+        """Validate both input boxes before showing the proof dashboard."""
+        prompt = self.settlement_prompt_input.strip()
+        market_ref = self.market_ref_input.strip()
+
+        if not prompt:
+            self.active_input_field = "prompt"
+            return False, "Paste the settlement prompt first"
+        if not market_ref:
+            self.active_input_field = "market"
+            return False, "Paste the Market URL or 0x Market ID"
+
+        market, err = self.fetch_market_by_ref_for_preflight(market_ref)
+        if err or not market:
+            self.active_input_field = "market"
+            return False, "INPUT ERROR: " + (err or "Could not resolve market")
+
+        meta = market.get("metadata") or {}
+        model_info = meta.get("model") or {}
+        official_prompt = (
+            model_info.get("prompt_context")
+            or model_info.get("promptContext")
+            or market.get("settlementPrompt")
+            or ""
+        )
+        official_question = meta.get("question", "") or market.get("question", "") or ""
+        outcomes_for_match = meta.get("outcomes") or market.get("outcomes") or []
+
+        # Always ensure the pasted prompt belongs to the selected visible market.
+        # This is intentionally smarter than a single QUESTION: comparison because
+        # many sports prompts do not contain a QUESTION: field and instead say
+        # "Settle based on the official result...".
+        belongs, reason = prompt_belongs_to_market(prompt, official_question, outcomes_for_match)
+        if not belongs:
+            self.active_input_field = "prompt"
+            return False, "INPUT ERROR: Settlement prompt does not match the Delphi market URL/ID"
+
+        # If Delphi exposes the canonical prompt, do NOT hard-block on exact text
+        # mismatch here. Delphi prompts can include web-page text, spacing, hidden
+        # content, or formatting that differs from what the user copied from the UI.
+        # The guard above already blocks clearly wrong market/prompt pairs using
+        # question/outcome matching. Exact prompt integrity is still reported later
+        # in the proof dashboard by oracle_ree.py, but it should not stop valid
+        # users at the input screen.
+        if official_prompt:
+            if normalize_prompt_text(prompt) != normalize_prompt_text(official_prompt):
+                self.prompt_warning = "Pasted prompt text differs from Delphi canonical text; continuing after market/outcome match."
+
+        # Preload metadata so the dashboard is populated immediately after run starts.
+        # IMPORTANT: the backend only accepts the real 0x market id. If preflight
+        # cannot produce a 0x id, do NOT open the execution dashboard.
+        resolved_0x = market_0x_id_from_market(market)
+        if not resolved_0x:
+            self.active_input_field = "market"
+            return False, "INPUT ERROR: Delphi URL resolved, but no valid 0x market ID was found. Paste the 0x market ID."
+
+        self.market_data = market
+        self.preflight_market_id = resolved_0x
+        self.resolved_market_id = resolved_0x
+        self.resolved_question = official_question
+        self.resolved_delphi_model = str(
+            model_info.get("model_identifier")
+            or model_info.get("modelIdentifier")
+            or market.get("judgeModel", "")
+            or ""
+        )
+        return True, "Input verified. Running canonical proof..."
 
     def start_run(self) -> None:
         if self.mode == "running":
             return
 
-        if not self.market_input.strip():
-            self.status = "Press Enter and paste a Market URL, Market ID, or Settlement Prompt"
+        # Official verification requires both fields.
+        if not self.settlement_prompt_input.strip():
+            self.status = "Paste the settlement prompt first"
+            self.active_input_field = "prompt"
             return
+        if not self.market_ref_input.strip():
+            self.status = "Paste the Market URL or 0x Market ID"
+            self.active_input_field = "market"
+            return
+
+        ok, message = self.validate_inputs_before_run()
+        self.status = message
+        if not ok:
+            # Stay on the input screen. Do NOT show execution dashboard for
+            # wrong URLs, unresolved markets, or prompt/market mismatches.
+            return
+
+        self.market_input = (
+            "MARKET URL / MARKET ID:\n"
+            f"{self.market_ref_input.strip()}\n\n"
+            "SETTLEMENT PROMPT:\n"
+            f"{self.settlement_prompt_input.strip()}"
+        )
 
         script = Path(__file__).parent / "oracle_ree.py"
         if not script.exists():
@@ -264,14 +631,30 @@ class TUI:
         self.started_at = time.time()
         self.finished_at = None
         self.ree_receipt_path = ""
+        # Keep metadata resolved during preflight so dashboard starts populated
+        # and backend receives the 0x market ID instead of the app UUID.
+        self.resolved_market_id = self.preflight_market_id or self.resolved_market_id
+        self.resolved_question = self.resolved_question
+        self.resolved_delphi_model = self.resolved_delphi_model
+        self.resolved_ree_model = ""
+        self.resolved_classification = ""
+        self.oracle_result = ""
+        self.prompt_source = ""
+        self.prompt_match = ""
+        self.question_match = ""
+        self.verification_mode = ""
+        self.prompt_warning = ""
+        self.official_prompt_hash = ""
+        self.provided_prompt_hash = ""
         self.left_scroll = 0
         self.log_scroll = 0
 
         # Fetch Delphi metadata only after Run, not on the first input page.
         self.trigger_fetch()
 
-        cmd = ["python3", str(script), "--market", self.market_input.strip()]
-        self.add_log("$ " + " ".join(shlex.quote(c) for c in cmd))
+        backend_arg = self.backend_market_argument()
+        cmd = ["python3", str(script), "--market", backend_arg]
+        # Keep logs clean; backend output is enough for the proof dashboard.
 
         def worker():
             rc = 1
@@ -302,6 +685,10 @@ class TUI:
 
         self.screen = "input"
         self.market_input = ""
+        self.settlement_prompt_input = ""
+        self.market_ref_input = ""
+        self.preflight_market_id = ""
+        self.active_input_field = "prompt"
         self.logs = []
         self.proof_lines = []
         self.progress = 0.0
@@ -316,6 +703,19 @@ class TUI:
         self.started_at = None
         self.finished_at = None
         self.ree_receipt_path = ""
+        self.resolved_market_id = ""
+        self.resolved_question = ""
+        self.resolved_delphi_model = ""
+        self.resolved_ree_model = ""
+        self.resolved_classification = ""
+        self.oracle_result = ""
+        self.prompt_source = ""
+        self.prompt_match = ""
+        self.question_match = ""
+        self.verification_mode = ""
+        self.prompt_warning = ""
+        self.official_prompt_hash = ""
+        self.provided_prompt_hash = ""
         self.left_scroll = 0
         self.log_scroll = 0
 
@@ -326,13 +726,97 @@ class TUI:
 
     def set_phase(self, key: str) -> None:
         self.phase = key
-        self.reached.add(key)
+        # Mark the selected phase and all previous phases as reached so the
+        # pipeline turns green progressively instead of only at the end.
+        seen = False
         for k, p, _ in PHASES:
+            self.reached.add(k)
             if k == key:
                 self.progress = max(self.progress, p)
+                seen = True
+                break
+        if not seen:
+            self.reached.add(key)
 
     def parse_line(self, line: str) -> None:
         low = line.lower()
+
+        # Extract useful structured values from oracle_ree.py output.
+        # This is important for URL / prompt input: oracle_ree.py resolves the
+        # final 0x market ID, then the TUI can fetch/display full market details.
+        def after_colon(txt: str) -> str:
+            return txt.split(":", 1)[1].strip() if ":" in txt else ""
+
+        if "[oracle] market id:" in low:
+            mid = after_colon(line)
+            if mid:
+                self.resolved_market_id = mid
+                self.trigger_fetch_for_id(mid)
+
+        elif "matched market:" in low:
+            m = re.search(r"0x[a-fA-F0-9]{40}", line)
+            if m:
+                self.resolved_market_id = m.group(0)
+                self.trigger_fetch_for_id(self.resolved_market_id)
+
+        elif "[oracle] question:" in low:
+            q = after_colon(line)
+            if q:
+                self.resolved_question = q
+
+        elif "[oracle] market:" in low:
+            q = after_colon(line)
+            if q and not self.resolved_question:
+                self.resolved_question = q
+
+        elif "[oracle] delphi model:" in low:
+            self.resolved_delphi_model = after_colon(line)
+
+        elif "[oracle] ree model:" in low:
+            self.resolved_ree_model = after_colon(line)
+
+        elif "[oracle] classification:" in low:
+            self.resolved_classification = after_colon(line)
+
+        elif "[oracle] prompt source:" in low:
+            self.prompt_source = after_colon(line)
+
+        elif "[oracle] prompt match:" in low:
+            self.prompt_match = after_colon(line)
+
+        elif "[oracle] question match:" in low:
+            self.question_match = after_colon(line)
+
+        elif "[oracle] verification mode:" in low:
+            self.verification_mode = after_colon(line)
+
+        elif "[oracle] official prompt hash:" in low:
+            self.official_prompt_hash = after_colon(line)
+
+        elif "[oracle] provided prompt hash:" in low:
+            self.provided_prompt_hash = after_colon(line)
+
+        elif "[oracle] prompt warning:" in low:
+            self.prompt_warning = after_colon(line)
+
+        elif "prompt source:" in low and not self.prompt_source:
+            self.prompt_source = after_colon(line)
+
+        elif "prompt match:" in low and not self.prompt_match:
+            self.prompt_match = after_colon(line)
+
+        elif "mode:" in low and not self.verification_mode:
+            self.verification_mode = after_colon(line)
+
+        elif "warning:" in low and not self.prompt_warning:
+            self.prompt_warning = after_colon(line)
+
+        elif "price verdict:" in low or "event verdict:" in low:
+            verdict = after_colon(line)
+            self.oracle_result = verdict
+            m = re.search(r"outcome:\s*([^.;]+)", verdict, re.I)
+            if m:
+                self.oracle_result = m.group(1).strip().strip('"\'')
 
         if "fetching market" in low:
             self.set_phase("fetch")
@@ -362,7 +846,9 @@ class TUI:
         keys = [
             "oracle hash", "evidence hash", "oracle evidence hash", "ipfs cid",
             "ree receipt", "ree receipt hash", "combined hash", "saved to",
-            "verification passed", "market:", "event verdict", "price verdict", "error"
+            "verification passed", "market:", "question:", "delphi model:", "event verdict", "price verdict",
+            "prompt source:", "prompt match:", "question match:", "verification mode:",
+            "official prompt hash:", "provided prompt hash:", "prompt warning:", "error"
         ]
 
         if any(k in low for k in keys):
@@ -383,6 +869,7 @@ class TUI:
             self.finished_at = time.time()
             if payload == 0:
                 self.status = "Success"
+                self.reached = {k for k, _, _ in PHASES}
                 self.set_phase("done")
                 self.progress = 1.0
             else:
@@ -467,44 +954,62 @@ class TUI:
         return data
 
     def handle_input_page_key(self, key) -> None:
-        """Direct typing/pasting on the first page.
+        """Two-field input screen.
 
-        Users can paste a market URL, market ID, or full settlement prompt
-        directly into the active chat-style field. Multiline paste is normalized
-        into a single clean line for display/execution.
+        Field 1: settlement prompt
+        Field 2: Market URL / Market ID
+
+        Tab/Enter switches fields. r runs after both fields are filled.
         """
-        if key in (curses.KEY_BACKSPACE, 127, 8, "\x7f", "\x08"):
-            self.market_input = self.market_input[:-1]
-            self.status = "Ready" if not self.market_input else "Input ready. Press r to run."
-            return
-
-        if key in (curses.KEY_DC,):
+        if key in ("\t", curses.KEY_BTAB):
+            self.active_input_field = "market" if self.active_input_field == "prompt" else "prompt"
+            self.status = "Ready"
             return
 
         if key in ("\n", "\r", curses.KEY_ENTER, 10, 13):
-            if self.market_input.strip():
-                self.status = "Input ready. Press r to run."
+            if self.active_input_field == "prompt":
+                self.active_input_field = "market"
+                self.status = "Paste the Market URL or 0x Market ID"
             else:
-                self.status = "Type or paste a Market URL, Market ID, or Settlement Prompt"
+                if self.settlement_prompt_input.strip() and self.market_ref_input.strip():
+                    self.status = "Input ready. Press r to run."
+                else:
+                    self.status = "Both fields are required"
             return
 
         if key == "\x1b":
-            if self.market_input.strip():
+            if self.settlement_prompt_input.strip() and self.market_ref_input.strip():
                 self.status = "Input ready. Press r to run."
+            else:
+                self.status = "Both fields are required for canonical verification"
+            return
+
+        target = "settlement_prompt_input" if self.active_input_field == "prompt" else "market_ref_input"
+        current = getattr(self, target)
+
+        if key in (curses.KEY_BACKSPACE, 127, 8, "\x7f", "\x08"):
+            setattr(self, target, current[:-1])
+            self.status = "Ready"
+            return
+
+        if key in (curses.KEY_DC,):
             return
 
         if isinstance(key, int):
             return
 
         if isinstance(key, str):
-            # Remove bracketed paste control sequences and normalize multiline prompt text.
             cleaned = key.replace("\x1b[200~", "").replace("\x1b[201~", "")
-            cleaned = " ".join(cleaned.replace("\r", "\n").splitlines()) if ("\n" in cleaned or "\r" in cleaned) else cleaned
-            # Ignore non-printable escape leftovers.
-            cleaned = "".join(ch for ch in cleaned if ch.isprintable() or ch.isspace())
+            # Keep multiline prompt content, but keep market URL/ID single-line.
+            if self.active_input_field == "market":
+                cleaned = " ".join(cleaned.replace("\r", "\n").splitlines()) if ("\n" in cleaned or "\r" in cleaned) else cleaned
+            cleaned = "".join(ch for ch in cleaned if ch.isprintable() or ch in "\n\r\t ")
             if cleaned:
-                self.market_input += cleaned
-                self.status = "Input ready. Press r to run."
+                setattr(self, target, current + cleaned)
+                if self.settlement_prompt_input.strip() and self.market_ref_input.strip():
+                    self.status = "Input ready. Press r to run."
+                else:
+                    self.status = "Ready"
             return
 
     # ── drawing helpers ───────────────────────────────────────────────────
@@ -555,8 +1060,8 @@ class TUI:
         self.put(stdscr, h - 1, max(0, w - len(ver) - 1), ver, curses.A_REVERSE)
 
     def draw_input_page(self, stdscr: curses.window, h: int, w: int) -> None:
-        box_w = min(118, max(72, w - 12))
-        box_h = 18
+        box_w = min(124, max(82, w - 12))
+        box_h = 24
         x = max(0, (w - box_w) // 2)
         y = max(1, (h - box_h) // 2)
 
@@ -575,39 +1080,58 @@ class TUI:
 
         inner_x = x + 6
         field_w = box_w - 12
-
-        self.put(stdscr, y + 6, inner_x, "INPUT", curses.color_pair(1) | curses.A_BOLD)
-        self.put(stdscr, y + 7, inner_x, "Market URL  ·  Market ID  ·  Full Settlement Prompt", curses.color_pair(6))
-
-        # Chat-style active input field. Users can type or paste directly here.
-        self.put(stdscr, y + 9, inner_x, "╭" + "─" * (field_w - 2) + "╮", curses.color_pair(2))
-        self.put(stdscr, y + 10, inner_x, "│", curses.color_pair(2))
-        self.put(stdscr, y + 10, inner_x + field_w - 1, "│", curses.color_pair(2))
-        self.put(stdscr, y + 11, inner_x, "╰" + "─" * (field_w - 2) + "╯", curses.color_pair(2))
-
         blink = int(time.time() * 2) % 2 == 0
         cursor = "█" if blink else " "
-        display = " ".join(self.market_input.split())
-        if display:
-            prompt_prefix = "> "
-            available = max(8, field_w - 6)
-            visible = compact_value(display, available)
-            input_line = prompt_prefix + visible + " " + cursor
-            attr = curses.color_pair(1)
-        else:
-            input_line = "> " + cursor
-            attr = curses.color_pair(2)
-        self.put(stdscr, y + 10, inner_x + 2, input_line[:field_w - 4], attr)
 
-        if display:
-            meta = f"Input ready · {len(self.market_input)} characters · press r to run"
-            self.put(stdscr, y + 13, inner_x, meta[:field_w], curses.color_pair(3))
-        else:
-            self.put(stdscr, y + 13, inner_x, "Type or paste directly above. Press Enter when done, then r to run.", curses.color_pair(2))
+        def draw_field(row: int, title: str, help_text: str, value: str, active: bool, multiline: bool = False) -> None:
+            title_attr = curses.color_pair(6) | curses.A_BOLD if active else curses.color_pair(1) | curses.A_BOLD
+            border_attr = curses.color_pair(6) if active else curses.color_pair(2)
+            self.put(stdscr, y + row, inner_x, title, title_attr)
+            self.put(stdscr, y + row + 1, inner_x, help_text[:field_w], curses.color_pair(2))
 
-        self.put(stdscr, y + 15, inner_x, "CONTROLS", curses.color_pair(1) | curses.A_BOLD)
-        controls = "Type/paste directly   Enter done   r run   q quit"
-        self.put(stdscr, y + 16, inner_x, controls[:field_w], curses.color_pair(2))
+            self.put(stdscr, y + row + 2, inner_x, "╭" + "─" * (field_w - 2) + "╮", border_attr)
+            self.put(stdscr, y + row + 3, inner_x, "│", border_attr)
+            self.put(stdscr, y + row + 3, inner_x + field_w - 1, "│", border_attr)
+            self.put(stdscr, y + row + 4, inner_x, "╰" + "─" * (field_w - 2) + "╯", border_attr)
+
+            if value.strip():
+                display = " ".join(value.split())
+                shown = compact_value(display, field_w - 8)
+                line = "> " + shown + (" " + cursor if active else "")
+                attr = curses.color_pair(1)
+            else:
+                placeholder = "Paste here..."
+                line = "> " + (cursor if active else placeholder)
+                attr = curses.color_pair(2)
+            self.put(stdscr, y + row + 3, inner_x + 2, line[:field_w - 4], attr)
+
+        draw_field(
+            6,
+            "1. SETTLEMENT PROMPT",
+            "Paste the FULL settlement prompt from Delphi.",
+            self.settlement_prompt_input,
+            self.active_input_field == "prompt",
+            multiline=True,
+        )
+
+        draw_field(
+            12,
+            "2. MARKET URL / MARKET ID",
+            "Required anchor for canonical verification.",
+            self.market_ref_input,
+            self.active_input_field == "market",
+        )
+
+        prompt_ok = bool(self.settlement_prompt_input.strip())
+        market_ok = bool(self.market_ref_input.strip())
+        status = "READY TO RUN" if prompt_ok and market_ok else "BOTH FIELDS REQUIRED"
+        status_attr = curses.color_pair(3) | curses.A_BOLD if prompt_ok and market_ok else curses.color_pair(5)
+        self.put(stdscr, y + 18, inner_x, "INTEGRITY", curses.color_pair(1) | curses.A_BOLD)
+        self.put(stdscr, y + 19, inner_x, "Prompt + market anchor will be compared before canonical proof.", curses.color_pair(2))
+        self.put(stdscr, y + 20, inner_x, status, status_attr)
+
+        controls = "TAB switch field   ENTER next/done   r run   q quit   Backspace delete"
+        self.put(stdscr, y + 22, inner_x, controls[:field_w], curses.color_pair(2))
 
         if self.status and self.status not in ("Ready", "Input ready. Press r to run."):
             self.put(stdscr, y + box_h - 2, inner_x, f"Status: {self.status}"[:field_w], curses.color_pair(5))
@@ -640,9 +1164,40 @@ class TUI:
                 return line.split(":", 1)[1].strip() if ":" in line else line.strip()
         return ""
 
+    def latest_proof_json(self) -> dict:
+        """Read the latest OracleREE proof JSON when available.
+
+        The backend can finish oracle evidence without producing a REE receipt.
+        Reading the proof file lets the TUI show that honestly instead of
+        showing a false mismatch or fake verify command.
+        """
+        saved = self.latest_saved_file()
+        if not saved:
+            return {}
+        path = Path(saved)
+        if not path.is_absolute():
+            path = Path(__file__).parent / saved
+        try:
+            if path.exists():
+                return json.loads(path.read_text())
+        except Exception:
+            return {}
+        return {}
+
     def latest_ree_receipt_path(self) -> str:
         if self.ree_receipt_path:
             return self.ree_receipt_path
+
+        proof = self.latest_proof_json()
+        receipt = proof.get("ree_receipt") if isinstance(proof, dict) else None
+        if isinstance(receipt, dict):
+            for key in ("path", "receipt_path", "file", "file_path"):
+                val = receipt.get(key)
+                if val:
+                    return str(val)
+        elif isinstance(receipt, str) and "/" in receipt:
+            return receipt
+
         # Prefer the full local file path, not the later sha256 receipt hash summary.
         for line in reversed(self.logs):
             low = line.lower()
@@ -652,12 +1207,33 @@ class TUI:
                     return val
         return ""
 
+    def latest_ree_receipt_hash(self) -> str:
+        proof = self.latest_proof_json()
+        if isinstance(proof, dict):
+            receipt = proof.get("ree_receipt")
+            if isinstance(receipt, dict):
+                for key in ("receipt_hash", "hash", "ree_receipt_hash"):
+                    if receipt.get(key):
+                        return str(receipt.get(key))
+            verification = proof.get("verification") or {}
+            if verification.get("ree_receipt_hash"):
+                return str(verification.get("ree_receipt_hash"))
+        return self.latest_line_value("ree receipt hash")
+
+    def latest_combined_hash(self) -> str:
+        proof = self.latest_proof_json()
+        if isinstance(proof, dict):
+            verification = proof.get("verification") or {}
+            if verification.get("combined_hash"):
+                return str(verification.get("combined_hash"))
+        return self.latest_line_value("combined hash")
+
     def market_summary(self) -> tuple[str, str, str, str, str, str, str, str]:
-        question = ""
-        mid = extract_market_id(self.market_input) or ""
+        question = self.resolved_question or ""
+        mid = self.resolved_market_id or extract_0x_market_id(self.market_input) or extract_uuid(self.market_input) or ""
         status = ""
         resolves = ""
-        delphi_model = ""
+        delphi_model = self.resolved_delphi_model or ""
         sources = ""
         outcomes = ""
         prompt_ctx = ""
@@ -665,21 +1241,97 @@ class TUI:
         if self.market_data:
             meta = self.market_data.get("metadata") or {}
             model_info = meta.get("model") or {}
-            question = meta.get("question", "") or self.market_data.get("question", "") or ""
+            question = meta.get("question", "") or self.market_data.get("question", "") or question
             mid = self.market_data.get("id", "") or mid
             status = str(self.market_data.get("status", "") or "")
             resolves = str(self.market_data.get("resolvesAt", "") or self.market_data.get("closeTime", "") or self.market_data.get("close_time", ""))[:16].replace("T", " ")
-            delphi_model = str(model_info.get("model_identifier") or model_info.get("modelIdentifier") or self.market_data.get("judgeModel", "") or "")
+            delphi_model = str(model_info.get("model_identifier") or model_info.get("modelIdentifier") or self.market_data.get("judgeModel", "") or delphi_model)
             src = self.market_data.get("dataSources") or meta.get("dataSources") or []
             outs = meta.get("outcomes") or self.market_data.get("outcomes") or []
             sources = " · ".join(map(str, src))
             outcomes = " · ".join(map(str, outs))
             prompt_ctx = str(model_info.get("prompt_context") or model_info.get("promptContext") or self.market_data.get("settlementPrompt") or "")
         elif not mid:
-            question = "Raw settlement prompt"
+            # Raw prompt that has not been matched to a Delphi market yet.
             prompt_ctx = self.market_input
+            m = re.search(r"QUESTION:\s*(.+?)(?:DATA SOURCES:|SETTLEMENT RULES:|VALID OUTCOMES|$)", self.market_input, re.I | re.S)
+            question = " ".join(m.group(1).split()) if m else (self.resolved_question or "Raw settlement prompt")
+        else:
+            # URL/UUID/prompt already resolved by oracle_ree.py, but metadata may still be loading.
+            prompt_ctx = self.market_input if len(self.market_input) > 80 else ""
+            if not question:
+                question = "Resolving market details..."
 
         return question, mid, status, resolves, delphi_model, sources, outcomes, prompt_ctx
+
+    def creator_outcome(self) -> str:
+        """Return Delphi creator/market settled outcome when available."""
+        if not self.market_data:
+            return ""
+        meta = self.market_data.get("metadata") or {}
+        outcomes = meta.get("outcomes") or self.market_data.get("outcomes") or []
+        idx = self.market_data.get("winningOutcomeIdx")
+        if idx is None:
+            idx = self.market_data.get("winningOutcomeIndex")
+        try:
+            if idx is not None and outcomes:
+                return str(outcomes[int(idx)])
+        except Exception:
+            pass
+        for key in ("winningOutcome", "finalOutcome", "outcome"):
+            if self.market_data.get(key):
+                return str(self.market_data.get(key))
+        return ""
+
+    def oracle_outcome(self) -> str:
+        """Return OracleREE's extracted outcome/verdict when detectable.
+
+        If the backend evidence result is null/None, do not return None as a
+        real result. The UI should show INCONCLUSIVE and comparison should stay
+        PENDING, not MISMATCH.
+        """
+        if self.oracle_result and str(self.oracle_result).strip().lower() not in {"none", "null", "inconclusive"}:
+            return self.oracle_result
+
+        proof = self.latest_proof_json()
+        evidence = proof.get("oracle_evidence", {}) if isinstance(proof, dict) else {}
+        event_verdict = evidence.get("event_verdict") if isinstance(evidence, dict) else None
+        if isinstance(event_verdict, dict):
+            for key in ("matchedOutcome", "matched_outcome", "verdict"):
+                val = event_verdict.get(key)
+                if val and str(val).strip().lower() not in {"none", "null", "unknown"}:
+                    return str(val).strip()
+
+        price_verdict = evidence.get("price_verdict") if isinstance(evidence, dict) else ""
+        if price_verdict:
+            m = re.search(r"outcome:\s*([^.;]+)", str(price_verdict), re.I)
+            if m:
+                return m.group(1).strip().strip('"\'')
+
+        for line in reversed(self.proof_lines + self.logs):
+            m = re.search(r"outcome:\s*([^.;]+)", line, re.I)
+            if m:
+                val = m.group(1).strip().strip('"\'')
+                if val.lower() not in {"none", "null"}:
+                    return val
+        return ""
+
+    def oracle_result_display(self) -> str:
+        return self.oracle_outcome() or "INCONCLUSIVE"
+
+    def settlement_match_status(self) -> tuple[str, int]:
+        creator = self.creator_outcome().strip().lower()
+        oracle_raw = self.oracle_outcome().strip()
+        oracle = oracle_raw.lower()
+        if creator and oracle:
+            if oracle in {"none", "null", "inconclusive", "unknown"}:
+                return "PENDING", curses.color_pair(5) | curses.A_BOLD
+            if creator == oracle or creator in oracle or oracle in creator:
+                return "MATCH", curses.color_pair(3) | curses.A_BOLD
+            return "MISMATCH", curses.color_pair(4) | curses.A_BOLD
+        if creator and not oracle:
+            return "PENDING", curses.color_pair(5) | curses.A_BOLD
+        return "PENDING", curses.color_pair(2)
 
     def draw_left_results(self, stdscr: curses.window, h: int, left_w: int) -> None:
         y = 1
@@ -792,9 +1444,9 @@ class TUI:
         # ── proof package, the important part ──
         if y < h - 2:
             y = self.section_header(stdscr, y, rx, rw, "PROOF PACKAGE")
-        combined = self.latest_line_value("combined hash")
+        combined = self.latest_combined_hash()
         oracle_hash = self.latest_line_value("oracle evidence hash") or self.latest_line_value("evidence hash") or self.latest_line_value("oracle hash")
-        ree_hash = self.latest_line_value("ree receipt hash")
+        ree_hash = self.latest_ree_receipt_hash()
         ipfs = self.latest_line_value("ipfs cid")
         saved = self.latest_saved_file()
         receipt_path = self.latest_ree_receipt_path()
@@ -981,8 +1633,8 @@ class TUI:
 
         oracle_hash = self.latest_line_value("oracle evidence hash") or self.latest_line_value("evidence hash") or self.latest_line_value("oracle hash")
         ipfs = self.latest_line_value("ipfs cid")
-        combined = self.latest_line_value("combined hash")
-        ree_hash = self.latest_line_value("ree receipt hash")
+        combined = self.latest_combined_hash()
+        ree_hash = self.latest_ree_receipt_hash()
         saved = self.latest_saved_file()
         receipt_path = self.latest_ree_receipt_path()
 
@@ -992,19 +1644,21 @@ class TUI:
         status_attr = curses.color_pair(3) if self.return_code == 0 else curses.color_pair(4) if self.return_code not in (None, 0) else curses.color_pair(5)
 
         # Mockup-like dimensions: compact logs, bigger proof/settlement clarity.
-        market_h = 12
-        summary_h = max(14, min(19, usable_h - 19))
-        evidence_h = 6
+        # Left column: keep market details short, use summary mainly for the settlement prompt,
+        # and put verdict comparison inside Oracle Evidence.
+        market_h = 9
+        summary_h = 7
+        evidence_h = max(12, usable_h - market_h - summary_h - 2)
         if usable_h < 38:
-            market_h = 10
-            summary_h = max(10, usable_h - 17)
-            evidence_h = 5
+            market_h = 8
+            summary_h = 6
+            evidence_h = max(10, usable_h - market_h - summary_h - 2)
 
         exec_h = 5
         pipeline_h = 7
-        proof_h = 12
-        verify_h = 5
-        logs_h = max(7, usable_h - exec_h - pipeline_h - proof_h - verify_h - 4)
+        proof_h = 14
+        verify_h = 4
+        logs_h = max(6, usable_h - exec_h - pipeline_h - proof_h - verify_h - 4)
 
         # ── LEFT: MARKET DETAILS ─────────────────────────────────────────
         lx, y, bw, bh = box(1, top, left_w, market_h, "⋈ MARKET DETAILS")
@@ -1024,53 +1678,47 @@ class TUI:
             yy = put_kv(lx + 2, yy, bw - 4, "Outcomes", outcomes, curses.color_pair(3))
         elif prompt_outcomes:
             yy = put_kv(lx + 2, yy, bw - 4, "Outcomes", " · ".join(prompt_outcomes), curses.color_pair(3))
+        # Final outcome and verification mode are shown in Oracle Evidence + Result.
 
-        # ── LEFT: SETTLEMENT SUMMARY ─────────────────────────────────────
+        # ── LEFT: SETTLEMENT SUMMARY ─────────────────────────
         lx, y, bw, bh = box(1, top + market_h + 1, left_w, summary_h, "🏆 SETTLEMENT SUMMARY")
         yy = y + 2
-        summary_lines: list[tuple[str, int]] = []
-        if full_prompt:
-            summary_lines.append(("You are a prediction market settlement judge.", curses.color_pair(2)))
-            summary_lines.append(("Your task is to determine the correct outcome.", curses.color_pair(2)))
-            summary_lines.append(("", curses.color_pair(2)))
-            if question or prompt_question:
-                summary_lines.append(("Question:", curses.color_pair(3) | curses.A_BOLD))
-                summary_lines.append((question or prompt_question, curses.color_pair(1)))
-                summary_lines.append(("", curses.color_pair(2)))
-            if prompt_sources or sources:
-                summary_lines.append(("Data Sources:", curses.color_pair(3) | curses.A_BOLD))
-                for s in (prompt_sources or sources.split(" · "))[:4]:
-                    summary_lines.append((f"• {s}", curses.color_pair(1)))
-                summary_lines.append(("", curses.color_pair(2)))
-            if prompt_rules:
-                summary_lines.append(("Settlement Rules (short):", curses.color_pair(3) | curses.A_BOLD))
-                for r in prompt_rules[:4]:
-                    summary_lines.append((f"• {r}", curses.color_pair(1)))
-            elif outcomes or prompt_outcomes:
-                summary_lines.append(("Valid outcomes:", curses.color_pair(3) | curses.A_BOLD))
-                for o in (prompt_outcomes or outcomes.split(" · "))[:5]:
-                    summary_lines.append((f"• {o}", curses.color_pair(1)))
-        else:
-            summary_lines.append(("Settlement details appear here after market metadata loads.", curses.color_pair(2)))
+        yy = put_kv(lx + 2, yy, bw - 4, "Question", question or "—", curses.color_pair(1))
+        if delphi_model and yy < y + bh - 1:
+            yy = put_kv(lx + 2, yy, bw - 4, "Judge", delphi_model, curses.color_pair(3))
+        if sources and yy < y + bh - 1:
+            yy = put_kv(lx + 2, yy, bw - 4, "Sources", sources, curses.color_pair(3))
+        elif prompt_sources and yy < y + bh - 1:
+            yy = put_kv(lx + 2, yy, bw - 4, "Sources", " · ".join(prompt_sources), curses.color_pair(3))
+        if outcomes and yy < y + bh - 1:
+            yy = put_kv(lx + 2, yy, bw - 4, "Outcomes", outcomes, curses.color_pair(3))
+        elif prompt_outcomes and yy < y + bh - 1:
+            yy = put_kv(lx + 2, yy, bw - 4, "Outcomes", " · ".join(prompt_outcomes), curses.color_pair(3))
 
-        for text, attr in summary_lines:
-            if yy >= y + bh - 1:
-                break
-            if not text:
-                yy += 1
-                continue
-            wrapped = wrap_text(text, bw - 6)
-            for j, part in enumerate(wrapped[:3]):
-                if yy >= y + bh - 1:
-                    break
-                self.put(stdscr, yy, lx + 2, part[:bw - 4], attr)
-                yy += 1
-
-        # ── LEFT: ORACLE EVIDENCE ────────────────────────────────────────
-        lx, y, bw, bh = box(1, top + market_h + summary_h + 2, left_w, evidence_h, "🔒 ORACLE EVIDENCE")
+        # ── LEFT: ORACLE EVIDENCE + SETTLEMENT COMPARISON ────────────────
+        lx, y, bw, bh = box(1, top + market_h + summary_h + 2, left_w, evidence_h, "🔒 ORACLE EVIDENCE + RESULT")
         yy = y + 2
+        creator_res = self.creator_outcome()
+        oracle_res = self.oracle_result_display()
+        match_txt, match_attr = self.settlement_match_status()
         yy = put_kv(lx + 2, yy, bw - 4, "Oracle Hash", oracle_hash or "—", curses.color_pair(3) if oracle_hash else curses.color_pair(2))
         yy = put_kv(lx + 2, yy, bw - 4, "IPFS CID", ipfs or "—", curses.color_pair(3) if ipfs else curses.color_pair(2))
+        if receipt_path and yy < y + bh - 1:
+            yy = put_kv(lx + 2, yy, bw - 4, "Receipt", receipt_path, curses.color_pair(3))
+        elif yy < y + bh - 1:
+            yy = put_kv(lx + 2, yy, bw - 4, "Receipt", "NOT FOUND", curses.color_pair(5))
+        if ree_hash and yy < y + bh - 1:
+            yy = put_kv(lx + 2, yy, bw - 4, "REE Hash", ree_hash, curses.color_pair(3))
+        if yy < y + bh - 1:
+            yy += 1
+        yy = put_kv(lx + 2, yy, bw - 4, "Prompt Mode", self.verification_mode or "—", curses.color_pair(3) if self.verification_mode else curses.color_pair(2))
+        yy = put_kv(lx + 2, yy, bw - 4, "Prompt Match", self.prompt_match or "—", curses.color_pair(3) if str(self.prompt_match).upper() == "YES" else curses.color_pair(2))
+        yy = put_kv(lx + 2, yy, bw - 4, "Question Match", self.question_match or "—", curses.color_pair(3) if str(self.question_match).upper() == "YES" else curses.color_pair(2))
+        if yy < y + bh - 1:
+            yy += 1
+        yy = put_kv(lx + 2, yy, bw - 4, "Creator Result", creator_res or "—", curses.color_pair(3) if creator_res else curses.color_pair(2))
+        yy = put_kv(lx + 2, yy, bw - 4, "OracleREE", oracle_res, curses.color_pair(3) if oracle_res != "INCONCLUSIVE" else curses.color_pair(5))
+        yy = put_kv(lx + 2, yy, bw - 4, "Comparison", match_txt, match_attr)
 
         # ── RIGHT: EXECUTION OVERVIEW ────────────────────────────────────
         rx, y, bw, bh = box(right_x, top, right_w, exec_h, "⋆ EXECUTION OVERVIEW")
@@ -1163,30 +1811,42 @@ class TUI:
         yy += 1
         self.put(stdscr, yy, rx + 2, "─" * (bw - 4), curses.color_pair(2)); yy += 1
         artifacts = [
-            ("Combined Hash", combined or "—"),
             ("Oracle Hash", oracle_hash or "—"),
-            ("REE Receipt Hash", ree_hash or "—"),
             ("IPFS CID", ipfs or "—"),
+            ("REE Receipt Hash", ree_hash or "—"),
+            ("Combined Hash", combined or "—"),
             ("Receipt Path", receipt_path or "—"),
             ("Saved File", saved or "—"),
-            ("Saved At", time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(self.finished_at)) if self.finished_at else "—"),
         ]
         for name, val in artifacts:
             if yy >= y + bh - 1:
                 break
             ok = val != "—"
-            self.put(stdscr, yy, rx + 2, "☑" if ok else "·", curses.color_pair(3) if ok else curses.color_pair(2))
+            value_attr = curses.color_pair(3) if ok else curses.color_pair(2)
+            if name == "Settlement Match" and val == "MISMATCH":
+                value_attr = curses.color_pair(4) | curses.A_BOLD
+            elif name == "Settlement Match" and val == "MATCH":
+                value_attr = curses.color_pair(3) | curses.A_BOLD
+            self.put(stdscr, yy, rx + 2, "☑" if ok else "·", value_attr if ok else curses.color_pair(2))
             self.put(stdscr, yy, rx + 5, name[:21], curses.color_pair(1))
-            self.put(stdscr, yy, rx + 28, compact_value(val, bw - 31), curses.color_pair(3) if ok else curses.color_pair(2))
+            self.put(stdscr, yy, rx + 28, compact_value(val, bw - 31), value_attr)
             yy += 1
 
         # ── RIGHT: VERIFY ────────────────────────────────────────────────
         rx, y, bw, bh = box(right_x, top + exec_h + pipeline_h + proof_h + 3, right_w, verify_h, "⋆ VERIFY")
         yy = y + 2
         if self.return_code == 0:
-            self.put(stdscr, yy, rx + 2, "✓ Oracle data + REE execution cryptographically linked", curses.color_pair(3)); yy += 1
-            target = receipt_path or "<receipt.json>"
-            self.put(stdscr, yy, rx + 2, compact_value(f"python3 ree.py verify --receipt-path {target}", bw - 4), curses.color_pair(2))
+            if not receipt_path or not ree_hash:
+                self.put(stdscr, yy, rx + 2, "⚠ Oracle proof saved, but REE receipt was not found", curses.color_pair(5) | curses.A_BOLD); yy += 1
+                self.put(stdscr, yy, rx + 2, "Check oracle_ree.py receipt generation before claiming full REE proof", curses.color_pair(2))
+            elif self.prompt_warning:
+                self.put(stdscr, yy, rx + 2, "⚠ Non-canonical prompt: custom simulation only", curses.color_pair(5) | curses.A_BOLD); yy += 1
+                target = receipt_path
+                self.put(stdscr, yy, rx + 2, compact_value(f"python3 ree.py verify --receipt-path {target}", bw - 4), curses.color_pair(2))
+            else:
+                self.put(stdscr, yy, rx + 2, "✓ Oracle data + REE execution cryptographically linked", curses.color_pair(3)); yy += 1
+                target = receipt_path
+                self.put(stdscr, yy, rx + 2, compact_value(f"python3 ree.py verify --receipt-path {target}", bw - 4), curses.color_pair(2))
         elif receipt_path:
             self.put(stdscr, yy, rx + 2, "REE receipt path detected:", curses.color_pair(3)); yy += 1
             self.put(stdscr, yy, rx + 2, compact_value(receipt_path, bw - 4), curses.color_pair(3))
@@ -1216,13 +1876,38 @@ class TUI:
             status_txt, sattr = phase_log_status(key, i)
             if status_txt == "PENDING" and i > 5 and bh < 10:
                 continue
-            prefix = now_label if self.mode == "running" and key == self.phase else "        "
+            prefix = "        "
             left = f"[{prefix}] {label}"
             dots = "." * max(2, bw - len(left) - len(status_txt) - 8)
             self.put(stdscr, yy, rx + 2, left[:bw - 18], curses.color_pair(3) if status_txt == "SUCCESS" else curses.color_pair(2))
             self.put(stdscr, yy, rx + 2 + min(len(left), bw - 18), f" {dots} ", curses.color_pair(2))
             self.put(stdscr, yy, rx + bw - len(status_txt) - 3, status_txt, sattr)
             yy += 1
+
+        # Show raw backend errors/resolution lines so failures are actionable.
+        important_logs = [
+            l for l in self.logs[-12:]
+            if any(k in l.lower() for k in [
+                "error", "uuid detected", "found question", "matched market",
+                "error", "uuid detected", "found question", "matched market",
+                "market id:", "fetching market from delphi", "could not", "404",
+                "receipt saved", "receipt:"
+            ]) and not l.lower().startswith("[tui]") and not l.startswith("$")
+        ]
+        if important_logs and yy < y + bh - 1:
+            yy += 1
+            for raw in important_logs[-3:]:
+                if yy >= y + bh - 1:
+                    break
+                attr = curses.color_pair(4) if "error" in raw.lower() or "could not" in raw.lower() or "404" in raw.lower() else curses.color_pair(2)
+                self.put(stdscr, yy, rx + 2, compact_value(raw, bw - 4), attr)
+                yy += 1
+
+        if self.prompt_warning and yy < y + bh - 1:
+            yy += 1
+            self.put(stdscr, yy, rx + 2, "Prompt integrity warning:", curses.color_pair(5) | curses.A_BOLD); yy += 1
+            if yy < y + bh - 1:
+                self.put(stdscr, yy, rx + 2, compact_value(self.prompt_warning, bw - 4), curses.color_pair(5))
 
         if receipt_path and yy < y + bh - 1:
             yy += 1
