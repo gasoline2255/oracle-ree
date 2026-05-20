@@ -596,9 +596,12 @@ class TUI:
             self.active_input_field = "market"
             return False, "INPUT ERROR: Delphi URL resolved, but no valid 0x market ID was found. Paste the 0x market ID."
 
-        # Block running on markets that haven't closed yet
+        # Block running on markets that haven't closed or were cancelled
         market_status = market.get("status", "")
         resolves_at = market.get("resolvesAt", "")
+        if market_status == "expired":
+            self.active_input_field = "market"
+            return False, "Market was cancelled/expired — no settlement data available."
         if market_status == "open" and resolves_at:
             from datetime import datetime, timezone
             try:
@@ -609,9 +612,12 @@ class TUI:
             except Exception:
                 pass
 
-        # Block running on markets that haven't closed yet
+        # Block running on markets that haven't closed or were cancelled
         market_status = market.get("status", "")
         resolves_at = market.get("resolvesAt", "")
+        if market_status == "expired":
+            self.active_input_field = "market"
+            return False, "Market was cancelled/expired — no settlement data available."
         if market_status == "open" and resolves_at:
             from datetime import datetime, timezone
             try:
@@ -705,6 +711,8 @@ class TUI:
         cmd = ["python3", str(script), "--market", backend_arg]
         # Keep logs clean; backend output is enough for the proof dashboard.
 
+        self._proc = None
+
         def worker():
             rc = 1
             try:
@@ -716,6 +724,7 @@ class TUI:
                     errors="replace",
                     bufsize=1,
                 )
+                self._proc = proc
                 if proc.stdout:
                     for raw in proc.stdout:
                         self.events.put(("line", raw.rstrip("\n")))
@@ -724,6 +733,7 @@ class TUI:
             except Exception as exc:
                 self.events.put(("line", f"Error: {exc}"))
             finally:
+                self._proc = None
                 self.events.put(("done", rc))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -1112,7 +1122,10 @@ class TUI:
         if self.screen == "input":
             return
         self.put(stdscr, h - 1, 0, " " * w, curses.A_REVERSE)
-        keys = " q quit   e new input   r rerun "
+        if self.mode == "running":
+            keys = " c stop run   q quit "
+        else:
+            keys = " q quit   e new input   r rerun "
         self.put(stdscr, h - 1, 1, keys, curses.A_REVERSE)
         ver = " OracleREE · Gensyn Delphi settlement proof "
         self.put(stdscr, h - 1, max(0, w - len(ver) - 1), ver, curses.A_REVERSE)
@@ -1156,11 +1169,11 @@ class TUI:
                 display = " ".join(value.split())
                 shown = compact_value(display, field_w - 8)
                 line = "> " + shown + (" " + cursor if active else "")
-                attr = curses.color_pair(1)
+                attr = curses.color_pair(6) if active else curses.color_pair(1)
             else:
                 placeholder = "Paste here..."
                 line = "> " + (cursor if active else placeholder)
-                attr = curses.color_pair(2)
+                attr = curses.color_pair(6) if active else curses.color_pair(2)
             self.put(stdscr, y + row + 3, inner_x + 2, line[:field_w - 4], attr)
 
         draw_field(
@@ -2246,6 +2259,16 @@ class TUI:
                 continue
 
             if self.mode == "running":
+                if key == "c" or key == ord("c"):
+                    if hasattr(self, "_proc") and self._proc:
+                        try:
+                            self._proc.terminate()
+                        except Exception:
+                            pass
+                    self.status = "Cancelled"
+                    self.mode = "done"
+                    self.return_code = 1
+                    self.finished_at = time.time()
                 continue
 
             # q is the only quit key. Esc is used as "done"/neutral on the input screen.
