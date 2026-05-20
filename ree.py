@@ -1061,6 +1061,8 @@ class TUI:
             return
 
         if key in (curses.KEY_DC,):
+            setattr(self, target, "")
+            self.status = "Ready"
             return
 
         if isinstance(key, int):
@@ -1158,13 +1160,13 @@ class TUI:
             title_attr = curses.color_pair(6) | curses.A_BOLD if active else curses.color_pair(1) | curses.A_BOLD
             border_attr = curses.color_pair(6) if active else curses.color_pair(2)
             self.put(stdscr, y + row, inner_x, title, title_attr)
+            if value.strip():
+                self.put(stdscr, y + row, inner_x + field_w - 11, "[DEL=clear]", curses.color_pair(4))
             self.put(stdscr, y + row + 1, inner_x, help_text[:field_w], curses.color_pair(2))
-
             self.put(stdscr, y + row + 2, inner_x, "╭" + "─" * (field_w - 2) + "╮", border_attr)
             self.put(stdscr, y + row + 3, inner_x, "│", border_attr)
             self.put(stdscr, y + row + 3, inner_x + field_w - 1, "│", border_attr)
             self.put(stdscr, y + row + 4, inner_x, "╰" + "─" * (field_w - 2) + "╯", border_attr)
-
             if value.strip():
                 display = " ".join(value.split())
                 shown = compact_value(display, field_w - 8)
@@ -1201,11 +1203,11 @@ class TUI:
         self.put(stdscr, y + 19, inner_x, "Prompt + market anchor will be compared before canonical proof.", curses.color_pair(2))
         self.put(stdscr, y + 20, inner_x, status, status_attr)
 
-        controls = "TAB switch field   ENTER next/done   r run   q quit   Backspace delete"
+        controls = "TAB switch field   ENTER next/done   r run   q quit   DEL clear field"
         self.put(stdscr, y + 22, inner_x, controls[:field_w], curses.color_pair(2))
 
         if self.status and self.status not in ("Ready", "Input ready. Press r to run."):
-            self.put(stdscr, y + box_h - 2, inner_x, f"Status: {self.status}"[:field_w], curses.color_pair(5))
+            self.put(stdscr, y + box_h - 2, inner_x, compact_value(f"Status: {self.status}", field_w), curses.color_pair(5))
 
     def section_header(self, stdscr: curses.window, y: int, x: int, width: int, title: str) -> int:
         self.put(stdscr, y, x, "─" * width, curses.color_pair(2))
@@ -1809,7 +1811,10 @@ class TUI:
         yy = put_kv(lx + 2, yy, bw - 4, "Oracle Hash", oracle_hash or "—", curses.color_pair(3) if oracle_hash else curses.color_pair(2))
         yy = put_kv(lx + 2, yy, bw - 4, "IPFS CID", ipfs or "—", curses.color_pair(3) if ipfs else curses.color_pair(2))
         if receipt_path and yy < y + bh - 1:
-            yy = put_kv(lx + 2, yy, bw - 4, "Receipt", receipt_path, curses.color_pair(3))
+            import re as _re2
+            _m = _re2.search(r"/[^\s]+receipt_[0-9_]+\.json", receipt_path)
+            clean_r = _m.group(0) if _m else receipt_path
+            yy = put_kv(lx + 2, yy, bw - 4, "Receipt", clean_r, curses.color_pair(3))
         elif yy < y + bh - 1:
             waiting = "Waiting for REE..." if self.mode == "running" else "NOT FOUND"
             attr = curses.color_pair(6) if self.mode == "running" else curses.color_pair(5)
