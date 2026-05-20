@@ -284,6 +284,35 @@ def get_oracle_seal_snapshot(market_id: str) -> Optional[dict]:
         print(f"[oracle] OracleSeal lookup failed: {e}")
     return None
 
+
+def push_to_oracle_seal(proof: dict) -> bool:
+    """Auto-push REE proof to OracleSeal after run completes."""
+    verification = proof.get("verification", {}) or {}
+    receipt_hash = verification.get("ree_receipt_hash")
+    if not receipt_hash:
+        return False
+    try:
+        r = requests.post(
+            f"{ORACLE_SEAL_URL}/api/receipts",
+            json={
+                "marketId": proof.get("market_id"),
+                "receiptHash": receipt_hash,
+                "ipfsCid": verification.get("ipfs_cid"),
+                "combinedHash": verification.get("combined_hash"),
+                "oracleHash": verification.get("oracle_evidence_hash"),
+                "oracleSealIpfs": verification.get("oracle_seal_ipfs"),
+            },
+            timeout=10,
+        )
+        if r.ok:
+            print("[oracle] Pushed proof to OracleSeal ✓")
+            return True
+        print(f"[oracle] OracleSeal push failed: {r.status_code}")
+        return False
+    except Exception as e:
+        print(f"[oracle] OracleSeal push failed: {e}")
+        return False
+
 # ─── Oracle data fetchers ────────────────────────────────────────────────────
 
 def resolve_coingecko_id(symbol: str) -> Optional[str]:
@@ -911,6 +940,10 @@ def main() -> int:
         for key, files in seen.items():
             for old_file in files[5:]: old_file.unlink(missing_ok=True)
     except Exception: pass
+
+    # Auto-push proof to OracleSeal
+    if proof["verification"].get("ree_receipt_hash"):
+        push_to_oracle_seal(proof)
 
     if args.oracle_only: return 0
     return 0 if proof["verification"].get("ree_receipt_hash") else 2
