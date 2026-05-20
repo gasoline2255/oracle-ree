@@ -596,6 +596,32 @@ class TUI:
             self.active_input_field = "market"
             return False, "INPUT ERROR: Delphi URL resolved, but no valid 0x market ID was found. Paste the 0x market ID."
 
+        # Block running on markets that haven't closed yet
+        market_status = market.get("status", "")
+        resolves_at = market.get("resolvesAt", "")
+        if market_status == "open" and resolves_at:
+            from datetime import datetime, timezone
+            try:
+                close_time = datetime.fromisoformat(resolves_at.replace("Z", "+00:00"))
+                if close_time > datetime.now(timezone.utc):
+                    self.active_input_field = "market"
+                    return False, f"Market is still LIVE — closes {resolves_at[:16].replace('T',' ')} UTC. Run OracleREE after market closes."
+            except Exception:
+                pass
+
+        # Block running on markets that haven't closed yet
+        market_status = market.get("status", "")
+        resolves_at = market.get("resolvesAt", "")
+        if market_status == "open" and resolves_at:
+            from datetime import datetime, timezone
+            try:
+                close_time = datetime.fromisoformat(resolves_at.replace("Z", "+00:00"))
+                if close_time > datetime.now(timezone.utc):
+                    self.active_input_field = "market"
+                    return False, f"Market is still LIVE — closes {resolves_at[:16].replace('T',' ')} UTC. Run OracleREE after market closes."
+            except Exception:
+                pass
+
         self.market_data = market
         self.preflight_market_id = resolved_0x
         self.resolved_market_id = resolved_0x
@@ -1218,7 +1244,12 @@ class TUI:
 
     def latest_ree_receipt_path(self) -> str:
         if self.ree_receipt_path:
-            return self.ree_receipt_path
+            p = self.ree_receipt_path
+            import re as _re
+            m = _re.search(r"(/[^\s]+receipt_[0-9_]+\.json)", p)
+            if m:
+                return m.group(1)
+            return p
 
         proof = self.latest_proof_json()
         receipt = proof.get("ree_receipt") if isinstance(proof, dict) else None
@@ -1349,20 +1380,33 @@ class TUI:
         return ""
 
     def oracle_result_display(self) -> str:
-        return self.oracle_outcome() or "INCONCLUSIVE"
+        result = self.oracle_outcome()
+        if result:
+            return result
+        # If market is not settled, show appropriate message
+        if self.market_data:
+            status = self.market_data.get("status", "")
+            if status == "open":
+                return "Market still live"
+            if status not in ("settled",):
+                return "Awaiting settlement"
+        return "INCONCLUSIVE"
 
     def settlement_match_status(self) -> tuple[str, int]:
         creator = self.creator_outcome().strip().lower()
         oracle_raw = self.oracle_outcome().strip()
         oracle = oracle_raw.lower()
+        # Market not settled yet
+        if self.market_data and self.market_data.get("status") != "settled":
+            return "WAITING FOR SETTLEMENT", curses.color_pair(5) | curses.A_BOLD
         if creator and oracle:
-            if oracle in {"none", "null", "inconclusive", "unknown"}:
-                return "PENDING", curses.color_pair(5) | curses.A_BOLD
+            if oracle in {"none", "null", "inconclusive", "unknown", "market not settled", "market still live", "awaiting settlement"}:
+                return "WAITING FOR CREATOR", curses.color_pair(5) | curses.A_BOLD
             if creator == oracle or creator in oracle or oracle in creator:
                 return "MATCH", curses.color_pair(3) | curses.A_BOLD
             return "MISMATCH", curses.color_pair(4) | curses.A_BOLD
-        if creator and not oracle:
-            return "PENDING", curses.color_pair(5) | curses.A_BOLD
+        if not creator:
+            return "WAITING FOR CREATOR", curses.color_pair(5) | curses.A_BOLD
         return "PENDING", curses.color_pair(2)
 
     def draw_left_results(self, stdscr: curses.window, h: int, left_w: int) -> None:
@@ -1901,8 +1945,11 @@ class TUI:
                 self.put(stdscr, yy, rx + 2, compact_value(f"python3 ree.py verify --receipt-path {target}", bw - 4), curses.color_pair(2))
             else:
                 self.put(stdscr, yy, rx + 2, "✓ Oracle data + REE execution cryptographically linked", curses.color_pair(3)); yy += 1
-                target = receipt_path
-                self.put(stdscr, yy, rx + 2, compact_value(f"python3 ree.py verify --receipt-path {target}", bw - 4), curses.color_pair(2))
+                # Extract just the path from any command string
+                import re as _re
+                m = _re.search(r"(/[^\s]+receipt_[0-9_]+\.json)", receipt_path)
+                clean_path = m.group(1) if m else receipt_path
+                self.put(stdscr, yy, rx + 2, compact_value(clean_path, bw - 4), curses.color_pair(2))
         elif receipt_path:
             self.put(stdscr, yy, rx + 2, "REE receipt path detected:", curses.color_pair(3)); yy += 1
             self.put(stdscr, yy, rx + 2, compact_value(receipt_path, bw - 4), curses.color_pair(3))
