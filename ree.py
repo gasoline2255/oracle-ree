@@ -895,6 +895,15 @@ class TUI:
                 self.reached = {k for k, _, _ in PHASES}
                 self.set_phase("done")
                 self.progress = 1.0
+            elif payload == 2:
+                # Exit 2 = oracle evidence captured but no REE receipt
+                self.status = "Oracle OK — REE receipt missing"
+                # Mark all phases except done as reached
+                for k, _, _ in PHASES:
+                    if k != "done":
+                        self.reached.add(k)
+                self.phase = "receipt"
+                self.progress = 0.95
             else:
                 self.status = f"Failed (exit {payload})"
 
@@ -1621,6 +1630,12 @@ class TUI:
             Uses both real stdout events and soft progress so the UI visibly moves
             even while oracle_ree.py is quiet.
             """
+            if self.return_code == 2:
+                if key in ("receipt", "done"):
+                    return "failed", curses.color_pair(4) | curses.A_BOLD
+                if key in self.reached:
+                    return "done", curses.color_pair(3)
+                return "pending", curses.color_pair(2)
             if self.return_code not in (None, 0):
                 if key == self.phase:
                     return "failed", curses.color_pair(4) | curses.A_BOLD
@@ -1663,8 +1678,18 @@ class TUI:
 
         pct = int(self.progress * 100)
         elapsed = int(((self.finished_at or time.time()) - self.started_at)) if self.started_at else 0
-        run_status = "SUCCESS" if self.return_code == 0 else ("FAILED" if self.return_code not in (None, 0) else self.phase.upper())
-        status_attr = curses.color_pair(3) if self.return_code == 0 else curses.color_pair(4) if self.return_code not in (None, 0) else curses.color_pair(5)
+        if self.return_code == 0:
+            run_status = "SUCCESS"
+            status_attr = curses.color_pair(3)
+        elif self.return_code == 2:
+            run_status = "ORACLE OK · NO RECEIPT"
+            status_attr = curses.color_pair(5)
+        elif self.return_code is None:
+            run_status = self.phase.upper()
+            status_attr = curses.color_pair(5)
+        else:
+            run_status = "FAILED"
+            status_attr = curses.color_pair(4)
 
         # Mockup-like dimensions: compact logs, bigger proof/settlement clarity.
         # Left column: keep market details short, use summary mainly for the settlement prompt,
@@ -1892,6 +1917,13 @@ class TUI:
 
         def phase_log_status(key: str, i: int) -> tuple[str, int]:
             state, attr = progress_state(key, i)
+            # Exit 2: oracle steps succeed, receipt/done fail
+            if self.return_code == 2:
+                if key in ("receipt", "done"):
+                    return "FAILED", curses.color_pair(4) | curses.A_BOLD
+                if key in self.reached:
+                    return "SUCCESS", curses.color_pair(3)
+                return "PENDING", curses.color_pair(2)
             if self.return_code == 0 or state == "done":
                 return "SUCCESS", curses.color_pair(3)
             if state == "current":
