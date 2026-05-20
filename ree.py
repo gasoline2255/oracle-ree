@@ -486,10 +486,21 @@ class TUI:
         except Exception:
             pass
 
-        # Search current Delphi API pages by extracted question.
+        # Step 1: try to extract 0x market ID directly from the page HTML
         try:
             import requests
-            candidates: list[dict] = []
+            ox_match = re.search(r'0x[a-fA-F0-9]{40}(?![a-fA-F0-9])', html)
+            if ox_match:
+                mid = ox_match.group(0)
+                data = fetch_market_info(mid)
+                if data:
+                    return data, ""
+        except Exception:
+            pass
+
+        # Step 2: search by metadataUri UUID match
+        try:
+            import requests
             for status in ["open", "settled", "expired"]:
                 r = requests.get(
                     "https://api.delphi.fyi/markets",
@@ -500,22 +511,39 @@ class TUI:
                 if not r.ok:
                     continue
                 for m in r.json().get("markets", []):
-                    meta = m.get("metadata") or {}
-                    q = meta.get("question", "") or m.get("question", "") or ""
-                    # Prefer explicit metadata URI UUID match if Delphi provides it.
                     metadata_uri = str(m.get("metadataUri", ""))
                     if uuid.replace("-", "") in metadata_uri.replace("-", ""):
                         return m, ""
-                    if page_question and text_similarity(page_question, q) >= 0.72:
-                        candidates.append(m)
-            if len(candidates) == 1:
-                return candidates[0], ""
-            if len(candidates) > 1:
-                return None, "Multiple similar Delphi markets found. Use the exact 0x market ID."
         except Exception as exc:
             return None, f"Market lookup failed: {exc}"
 
-        return None, f"Could not resolve Delphi URL/UUID: {uuid}"
+        # Step 3: match by page title — pick highest similarity, no blocking
+        if page_question:
+            try:
+                import requests
+                best_match = None
+                best_score = 0.0
+                for status in ["open", "settled", "expired"]:
+                    r = requests.get(
+                        "https://api.delphi.fyi/markets",
+                        headers={"x-api-key": api_key},
+                        params={"limit": 100, "status": status},
+                        timeout=15,
+                    )
+                    if not r.ok:
+                        continue
+                    for m in r.json().get("markets", []):
+                        q = (m.get("metadata") or {}).get("question", "")
+                        score = text_similarity(page_question, q)
+                        if score > best_score:
+                            best_score = score
+                            best_match = m
+                if best_match and best_score >= 0.7:
+                    return best_match, ""
+            except Exception as exc:
+                return None, f"Market lookup failed: {exc}"
+
+        return None, f"Could not resolve market from URL. Try pasting the 0x market ID instead."
 
     def validate_inputs_before_run(self) -> tuple[bool, str]:
         """Validate both input boxes before showing the proof dashboard."""
@@ -554,16 +582,11 @@ class TUI:
             self.active_input_field = "prompt"
             return False, "INPUT ERROR: Settlement prompt does not match the Delphi market URL/ID"
 
-        # If Delphi exposes the canonical prompt, do NOT hard-block on exact text
-        # mismatch here. Delphi prompts can include web-page text, spacing, hidden
-        # content, or formatting that differs from what the user copied from the UI.
-        # The guard above already blocks clearly wrong market/prompt pairs using
-        # question/outcome matching. Exact prompt integrity is still reported later
-        # in the proof dashboard by oracle_ree.py, but it should not stop valid
-        # users at the input screen.
+        # Hard block if prompt does not match the official Delphi prompt
         if official_prompt:
             if normalize_prompt_text(prompt) != normalize_prompt_text(official_prompt):
-                self.prompt_warning = "Pasted prompt text differs from Delphi canonical text; continuing after market/outcome match."
+                self.active_input_field = "prompt"
+                return False, "INPUT ERROR: Settlement prompt does not match the official Delphi prompt for this market. Cannot run."
 
         # Preload metadata so the dashboard is populated immediately after run starts.
         # IMPORTANT: the backend only accepts the real 0x market id. If preflight
@@ -1706,19 +1729,26 @@ class TUI:
         if receipt_path and yy < y + bh - 1:
             yy = put_kv(lx + 2, yy, bw - 4, "Receipt", receipt_path, curses.color_pair(3))
         elif yy < y + bh - 1:
-            yy = put_kv(lx + 2, yy, bw - 4, "Receipt", "NOT FOUND", curses.color_pair(5))
+            waiting = "Waiting for REE..." if self.mode == "running" else "NOT FOUND"
+            attr = curses.color_pair(6) if self.mode == "running" else curses.color_pair(5)
+            yy = put_kv(lx + 2, yy, bw - 4, "Receipt", waiting, attr)
         if ree_hash and yy < y + bh - 1:
             yy = put_kv(lx + 2, yy, bw - 4, "REE Hash", ree_hash, curses.color_pair(3))
         if yy < y + bh - 1:
             yy += 1
-        yy = put_kv(lx + 2, yy, bw - 4, "Prompt Mode", self.verification_mode or "—", curses.color_pair(3) if self.verification_mode else curses.color_pair(2))
-        yy = put_kv(lx + 2, yy, bw - 4, "Prompt Match", self.prompt_match or "—", curses.color_pair(3) if str(self.prompt_match).upper() == "YES" else curses.color_pair(2))
-        yy = put_kv(lx + 2, yy, bw - 4, "Question Match", self.question_match or "—", curses.color_pair(3) if str(self.question_match).upper() == "YES" else curses.color_pair(2))
+        _w = "Verifying..." if self.mode == "running" else "—"
+        yy = put_kv(lx + 2, yy, bw - 4, "Prompt Mode", self.verification_mode or _w, curses.color_pair(3) if self.verification_mode else curses.color_pair(6) if self.mode == "running" else curses.color_pair(2))
+        yy = put_kv(lx + 2, yy, bw - 4, "Prompt Match", self.prompt_match or _w, curses.color_pair(3) if str(self.prompt_match).upper() == "YES" else curses.color_pair(6) if self.mode == "running" else curses.color_pair(2))
+        yy = put_kv(lx + 2, yy, bw - 4, "Question Match", self.question_match or _w, curses.color_pair(3) if str(self.question_match).upper() == "YES" else curses.color_pair(6) if self.mode == "running" else curses.color_pair(2))
         if yy < y + bh - 1:
             yy += 1
         yy = put_kv(lx + 2, yy, bw - 4, "Creator Result", creator_res or "—", curses.color_pair(3) if creator_res else curses.color_pair(2))
-        yy = put_kv(lx + 2, yy, bw - 4, "OracleREE", oracle_res, curses.color_pair(3) if oracle_res != "INCONCLUSIVE" else curses.color_pair(5))
-        yy = put_kv(lx + 2, yy, bw - 4, "Comparison", match_txt, match_attr)
+        oracle_display = "Fetching evidence..." if self.mode == "running" and oracle_res == "INCONCLUSIVE" else oracle_res
+        oracle_attr = curses.color_pair(6) if self.mode == "running" and oracle_res == "INCONCLUSIVE" else curses.color_pair(3) if oracle_res != "INCONCLUSIVE" else curses.color_pair(5)
+        yy = put_kv(lx + 2, yy, bw - 4, "OracleREE", oracle_display, oracle_attr)
+        comp_display = "Waiting for result..." if self.mode == "running" and match_txt == "PENDING" else match_txt
+        comp_attr = curses.color_pair(6) if self.mode == "running" and match_txt == "PENDING" else match_attr
+        yy = put_kv(lx + 2, yy, bw - 4, "Comparison", comp_display, comp_attr)
 
         # ── RIGHT: EXECUTION OVERVIEW ────────────────────────────────────
         rx, y, bw, bh = box(right_x, top, right_w, exec_h, "⋆ EXECUTION OVERVIEW")
@@ -1810,13 +1840,14 @@ class TUI:
         self.put(stdscr, yy, rx + 28, "Value / Status", curses.color_pair(1) | curses.A_BOLD)
         yy += 1
         self.put(stdscr, yy, rx + 2, "─" * (bw - 4), curses.color_pair(2)); yy += 1
+        waiting = "Waiting..." if self.mode == "running" else "—"
         artifacts = [
-            ("Oracle Hash", oracle_hash or "—"),
-            ("IPFS CID", ipfs or "—"),
-            ("REE Receipt Hash", ree_hash or "—"),
-            ("Combined Hash", combined or "—"),
-            ("Receipt Path", receipt_path or "—"),
-            ("Saved File", saved or "—"),
+            ("Oracle Hash", oracle_hash or waiting),
+            ("IPFS CID", ipfs or waiting),
+            ("REE Receipt Hash", ree_hash or waiting),
+            ("Combined Hash", combined or waiting),
+            ("Receipt Path", receipt_path or waiting),
+            ("Saved File", saved or waiting),
         ]
         for name, val in artifacts:
             if yy >= y + bh - 1:
