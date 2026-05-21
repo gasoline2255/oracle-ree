@@ -377,7 +377,9 @@ def resolve_source_url(source: str, question: str, close_time: str) -> str:
     for key, url in SOURCE_BASE_URLS.items():
         if key in src_lower: base = url; break
     if not base: base = f"https://{source.strip()}"
-    if not GROQ_API_KEY: return base
+    # Skip Groq resolution for sources that block scrapers or require auth
+    skip_groq = any(x in src_lower for x in ["twitter", "x (", "x.com", "reddit", "instagram", "tiktok"])
+    if not GROQ_API_KEY or skip_groq: return base
     print(f"[oracle] Resolving URL for '{source}' via Groq...")
     raw = call_groq(
         "You are a sports and news URL resolver. "
@@ -442,11 +444,44 @@ def call_groq(system_prompt: str, user_prompt: str) -> Optional[str]:
     except Exception as e:
         print(f"[oracle] Groq call failed: {e}"); return None
 
-def search_tavily(question: str, close_time: str, data_sources: list = None) -> str:
+def extract_domain(source: str) -> str:
+    """Extract domain from source name or URL."""
+    source = source.lower().strip()
+    if source.startswith("http"):
+        import re as _re
+        m = _re.search(r"https?://(?:www\.)?([^/]+)", source)
+        return m.group(1) if m else source
+    domain_map = {
+        "espn": "espn.com", "espncricinfo": "espncricinfo.com",
+        "cricinfo": "espncricinfo.com", "x": "x.com", "twitter": "twitter.com",
+        "coinmarketcap": "coinmarketcap.com", "cmc": "coinmarketcap.com",
+        "coingecko": "coingecko.com", "uefa": "uefa.com", "nba": "nba.com",
+        "nfl": "nfl.com", "ipl": "iplt20.com", "bbc": "bbc.com",
+        "sky sports": "skysports.com", "skysports": "skysports.com",
+        "bloomberg": "bloomberg.com", "reuters": "reuters.com",
+        "cnn": "cnn.com", "yahoo finance": "finance.yahoo.com",
+        "yahoo": "finance.yahoo.com", "binance": "binance.com",
+        "wikipedia": "wikipedia.org",
+    }
+    for key, domain in domain_map.items():
+        if key in source:
+            return domain
+    return source.replace(" ", "") + ".com"
+
+def search_tavily(question: str, close_time: str, data_sources: list = None,
+                  restrict_to_source: str = None) -> str:
+    """Search Tavily. If restrict_to_source is given, search within that domain only."""
     if not TAVILY_API_KEY: return ""
     date_str = close_time[:10] if close_time else ""
-    query = f"{question} result {date_str}".strip()
-    print(f"[oracle] Searching web via Tavily: {query}")
+    
+    if restrict_to_source:
+        domain = extract_domain(restrict_to_source)
+        query = f"site:{domain} {question} {date_str}".strip()
+        print(f"[oracle] Searching Tavily within {domain}: {query}")
+    else:
+        query = f"{question} result {date_str}".strip()
+        print(f"[oracle] Searching Tavily (general): {query}")
+    
     try:
         r = requests.post("https://api.tavily.com/search", json={
             "api_key": TAVILY_API_KEY, "query": query,
@@ -576,14 +611,27 @@ def build_oracle_evidence(market: dict) -> dict:
             evidence["oracle_seal_ipfs"] = oracle_seal.get("ipfs_cid")
             evidence["oracle_seal_captured_at"] = oracle_seal.get("captured_at")
         else:
-            # ── Fallback: live fetch ──────────────────────────────────────
-            print(f"[oracle] No OracleSeal snapshot — fetching live sources")
+            # ── Fetch ONLY from creator's listed sources ──────────────────
+            print(f"[oracle] Fetching from creator's listed sources: {data_sources}")
             for src_url in data_sources[:3]:
-                evidence["data_sources"].append(fetch_web_snapshot(src_url, question, resolves_at))
+                snap = fetch_web_snapshot(src_url, question, resolves_at)
+                evidence["data_sources"].append(snap)
+                if snap.get("text_snippet"):
+                    print(f"[oracle] ✓ Fetched from {src_url}")
+                else:
+                    print(f"[oracle] ✗ Failed to fetch {src_url} — trying Tavily within same source")
+                    # Tavily fallback — search WITHIN the same source domain only
+                    if TAVILY_API_KEY:
+                        tavily_src = search_tavily(question, resolves_at,
+                                                   restrict_to_source=src_url)
+                        if tavily_src:
+                            snap["text_snippet"] = tavily_src
+                            snap["source_method"] = "tavily_site_restricted"
+                            print(f"[oracle] ✓ Tavily found content from {extract_domain(src_url)}")
 
         web_context = "\n\n---\n\n".join(
-            f"[{s['url']}]\n{s.get('text_snippet', '')}"
-            for s in evidence["data_sources"] if "text_snippet" in s)
+            f"[{s.get('url','')}]\n{s.get('text_snippet', '')}"
+            for s in evidence["data_sources"] if s.get("text_snippet"))
 
         is_closed = resolves_at and datetime.fromisoformat(
             resolves_at.replace("Z", "+00:00")) < datetime.now(timezone.utc)
@@ -591,67 +639,79 @@ def build_oracle_evidence(market: dict) -> dict:
         if is_closed:
             outcomes = meta.get("outcomes") or []
             web_ok = bool(web_context.strip())
+
+            # Last resort: general Tavily if ALL listed sources failed
+            # Flag it clearly as unverified source
             if not web_ok and TAVILY_API_KEY:
-                tavily_result = search_tavily(question, resolves_at, data_sources)
+                print(f"[oracle] All listed sources failed — using general Tavily (unverified)")
+                tavily_result = search_tavily(question, resolves_at)
                 if tavily_result:
-                    web_context = tavily_result; web_ok = True
-                    print("[oracle] Using Tavily live search as web context")
+                    web_context = tavily_result
+                    web_ok = True
+                    evidence["source_warning"] = (
+                        f"WARNING: Could not fetch listed sources {data_sources}. "
+                        f"Verdict based on general web search — not creator's source."
+                    )
+                    print(f"[oracle] ⚠ Using general Tavily — source integrity not guaranteed")
+
             if web_ok:
-                system_msg = ("You are OracleREE's fact engine. Use the web evidence provided. "
-                    "Return ONLY valid JSON: verdict, matchedOutcome, confidence, explanation.")
-                user_msg = (f'Question: "{question}"\nValid outcomes: {", ".join(outcomes)}\n'
-                    f"Close time: {resolves_at}\n\nWEB EVIDENCE:\n{web_context[:4000]}")
+                # Check which sources we actually got data from
+                source_methods = []
+                for s in evidence["data_sources"]:
+                    if s.get("text_snippet"):
+                        method = s.get("source_method", "direct_fetch")
+                        source_methods.append(f"{s.get('original_source', s.get('url', ''))} ({method})")
+
+                system_msg = (
+                    "You are OracleREE's fact engine. Use ONLY the web evidence provided below. "
+                    "Do not use outside knowledge. "
+                    "Return ONLY valid JSON: verdict, matchedOutcome, confidence, explanation."
+                )
+                user_msg = (
+                    f'Question: "{question}"\n'
+                    f'Valid outcomes: {", ".join(outcomes)}\n'
+                    f"Close time: {resolves_at}\n"
+                    f'Listed data sources: {", ".join(data_sources)}\n'
+                    f"Sources actually fetched: {source_methods}\n"
+                    f"\nWEB EVIDENCE FROM LISTED SOURCES:\n{web_context[:4000]}"
+                )
             else:
-                print("[oracle] Web sources blocked/failed — using Groq knowledge directly")
-                source_hints = ""
-                for src in evidence["data_sources"]:
-                    if src.get("url"):
-                        source_hints += f"  Source: {src.get('original_source','')} → resolved to {src.get('url')}\n"
-                system_msg = ("You are a prediction market settlement judge. "
-                    "Answer based on your knowledge of real world events. "
-                    "IMPORTANT: Only output a matched outcome if you are CERTAIN of the result. "
-                    "If the event is after your knowledge cutoff or you are not sure, "
-                    "set matchedOutcome to null and confidence to 0. "
-                    "Never guess. Never use fallback rules like Draw for unknown results. "
-                    "Return ONLY valid JSON: verdict, matchedOutcome, confidence, explanation.")
-                user_msg = (f'Question: "{question}"\nValid outcomes: {", ".join(outcomes)}\n'
-                    f"Event date: {resolves_at[:10]}\nData sources attempted:\n{source_hints}"
-                    f"Settlement rules (DO NOT use fallback rules if you don't know the result):\n{prompt_context[:400]}\n"
-                    f"Do you know the actual result of this specific event from your training data? "
-                    f"If yes, return the correct matchedOutcome with high confidence. "
-                    f"If no, return matchedOutcome: null and confidence: 0.")
+                print("[oracle] All sources failed including Tavily — INCONCLUSIVE")
+                evidence["event_verdict"] = {
+                    "verdict": None, "matchedOutcome": None, "confidence": 0,
+                    "explanation": (
+                        f"Could not fetch data from listed sources: {data_sources}. "
+                        f"Cannot determine outcome without creator's data source."
+                    )
+                }
+                evidence["evidence_hash"] = sha256(json.dumps(evidence, sort_keys=True))
+                evidence["ipfs_cid"] = pin_to_ipfs(evidence, f"oracle-ree-{market.get('id', 'unknown')[:10]}")
+                return evidence
+
             raw = call_groq(system_msg, user_msg)
             if raw:
                 try:
                     clean = raw.replace("```json", "").replace("```", "").strip()
                     parsed = json.loads(re.search(r"\{[\s\S]*\}", clean).group(0))
                     matched = str(parsed.get("matchedOutcome") or "").strip()
+                    # Add source warning to verdict if we used fallback
+                    if evidence.get("source_warning"):
+                        parsed["source_warning"] = evidence["source_warning"]
+                        parsed["confidence"] = min(
+                            float(parsed.get("confidence") or 0), 0.6
+                        )  # cap confidence when source not verified
                     if matched and matched.lower() not in {"none", "null", "unknown"}:
                         evidence["event_verdict"] = parsed
-                        print(f"[oracle] Event verdict: {parsed.get('matchedOutcome')} (confidence: {parsed.get('confidence')})")
+                        print(f"[oracle] Event verdict: {parsed.get('matchedOutcome')} "
+                              f"(confidence: {parsed.get('confidence')})")
                     else:
-                        print(f"[oracle] Groq could not extract from web content — trying Tavily")
-                        if TAVILY_API_KEY:
-                            tavily_result = search_tavily(question, resolves_at, data_sources)
-                            if tavily_result:
-                                raw2 = call_groq(
-                                    "You are OracleREE's fact engine. Use the web evidence provided. "
-                                    "Return ONLY valid JSON: verdict, matchedOutcome, confidence, explanation.",
-                                    f'Question: "{question}"\nValid outcomes: {", ".join(outcomes)}\n'
-                                    f"\nWEB EVIDENCE:\n{tavily_result[:4000]}")
-                                if raw2:
-                                    clean2 = raw2.replace("```json", "").replace("```", "").strip()
-                                    parsed2 = json.loads(re.search(r"\{[\s\S]*\}", clean2).group(0))
-                                    matched2 = str(parsed2.get("matchedOutcome") or "").strip()
-                                    if matched2 and matched2.lower() not in {"none", "null", "unknown"}:
-                                        evidence["event_verdict"] = parsed2
-                                        print(f"[oracle] Event verdict (Tavily): {matched2} (confidence: {parsed2.get('confidence')})")
-                                        evidence["evidence_hash"] = sha256(json.dumps(evidence, sort_keys=True))
-                                        evidence["ipfs_cid"] = pin_to_ipfs(evidence, f"oracle-ree-{market.get('id', 'unknown')[:10]}")
-                                        return evidence
-                        evidence["event_verdict"] = {"verdict": None, "matchedOutcome": None,
-                            "confidence": 0, "explanation": "Could not determine outcome from available evidence."}
-                except Exception: pass
+                        print(f"[oracle] Groq could not extract verdict")
+                        evidence["event_verdict"] = {
+                            "verdict": None, "matchedOutcome": None, "confidence": 0,
+                            "explanation": "Could not determine outcome from available evidence."
+                        }
+                except Exception as ex:
+                    print(f"[oracle] Groq parse error: {ex}")
 
     evidence["evidence_hash"] = sha256(json.dumps(evidence, sort_keys=True))
     evidence["ipfs_cid"] = pin_to_ipfs(evidence, f"oracle-ree-{market.get('id', 'unknown')[:10]}")
