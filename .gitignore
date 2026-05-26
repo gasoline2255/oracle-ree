@@ -1,4 +1,4 @@
-.env.local
+
 oracle_proof_*.json
 __pycache__/
 *.pyc
