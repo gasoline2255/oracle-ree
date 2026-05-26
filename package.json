@@ -1,0 +1,23 @@
+{
+  "name": "oracle-ree",
+  "version": "1.0.0",
+  "description": "This repo holds scripts which allow users to interact with the Gensyn Reproducible Execution Environment (REE) as a Docker container. REE enables fully reproducible execution of machine-learning workloads. Note that this current release is constrained to reproducible inference of LLMs.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gasoline2255/oracle-ree.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/gasoline2255/oracle-ree/issues"
+  },
+  "homepage": "https://github.com/gasoline2255/oracle-ree#readme",
+  "dependencies": {
+    "@gensyn-ai/gensyn-delphi-sdk": "^1.1.0"
+  }
+}

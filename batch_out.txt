@@ -1,0 +1,34 @@
+[batch] Fetching 20 settled markets...
+[batch] Got 60 markets from API
+[batch] 20 markets with valid creator results
+
+[1/20] 
+       Creator: Yes | ID: 0x5a6214c6ae
+       Oracle: Yes → ✓ MATCH [4.0s]
+
+[2/20] 
+       Creator: Kolkata Knight Riders | ID: 0xdf466d573f
+       Oracle: Draw → ✗ WRONG [2.9s]
+
+[3/20] 
+       Creator: Chelsea | ID: 0xafffb4e7e4
+       Oracle: Chelsea → ✓ MATCH [1.1s]
+
+[4/20] 
+       Creator: No | ID: 0xa6ba932c34
+       Oracle: INCONCLUSIVE → ~ INCONCLUSIVE [3.5s]
+
+[5/20] 
+       Creator: Sunrisers Hyderabad | ID: 0x27f94af4ff
+       Oracle: Sunrisers Hyderabad → ✓ MATCH [4.2s]
+
+[6/20] 
+       Creator: No | ID: 0x46a12846a9
+       Oracle: INCONCLUSIVE → ~ INCONCLUSIVE [4.4s]
+
+[7/20] 
+       Creator: 79k-80k | ID: 0xcf1f7963be
+       Oracle: INCONCLUSIVE → ~ INCONCLUSIVE [0.8s]
+
+[8/20] 
+       Creator: Gujarat Titans | ID: 0x0096bf0c32
