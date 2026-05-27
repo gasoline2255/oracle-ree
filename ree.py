@@ -479,8 +479,8 @@ class TUI:
 
         if market_ref:
             canonical_ref = (self.preflight_market_id or
-                             self.resolved_market_id or
-                             extract_0x_market_id(market_ref) or market_ref)
+                             extract_0x_market_id(market_ref) or
+                             market_ref)
             if not extract_0x_market_id(canonical_ref):
                 uuid = extract_uuid(canonical_ref)
                 if uuid and canonical_ref.lower() == uuid.lower():
@@ -562,7 +562,13 @@ class TUI:
                     continue
                 for m in r.json().get("markets", []):
                     metadata_uri = str(m.get("metadataUri", ""))
-                    if uuid.replace("-", "") in metadata_uri.replace("-", ""):
+                    app_market_id = str(m.get("appMarketId", ""))
+                    market_id_field = str(m.get("id", ""))
+                    uuid_clean = uuid.replace("-", "").lower()
+                    if (uuid_clean in metadata_uri.replace("-", "").lower()
+                            or uuid.lower() in app_market_id.lower()
+                            or uuid_clean in app_market_id.replace("-","").lower()
+                            or uuid.lower() in market_id_field.lower()):
                         return m, ""
         except Exception as exc:
             return None, f"Market lookup failed: {exc}"
@@ -607,6 +613,13 @@ class TUI:
 
         market, err = self.fetch_market_by_ref_for_preflight(market_ref)
         if err or not market:
+            # In settle mode — pending markets may not be in API list
+            # Pass URL directly to oracle_ree.py which handles resolution
+            if self.settle_mode:
+                self.preflight_market_id = ""
+                self.resolved_market_id = market_ref
+                self.market_data = {}
+                return True, "Settle mode: passing market reference directly to oracle"
             self.active_input_field = "market"
             return False, "INPUT ERROR: " + (err or "Could not resolve market")
 

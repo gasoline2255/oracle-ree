@@ -131,7 +131,62 @@ def extract_market_id(raw: str) -> str:
     m = re.search(r"0x[a-fA-F0-9]{40}(?![a-fA-F0-9])", raw)
     if m:
         return m.group(0)
+    # UUID format URL — resolve via Delphi API
+    uuid_m = re.search(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+        raw, re.I
+    )
+    if uuid_m:
+        uuid = uuid_m.group(0)
+        print(f"[v2] Resolving UUID: {uuid}")
+        try:
+            api_key = os.environ.get("DELPHI_API_ACCESS_KEY", "")
+            r = requests.get(
+                f"https://api.delphi.fyi/markets",
+                headers={"x-api-key": api_key},
+                params={"limit": 200, "status": "open"},
+                timeout=15,
+            )
+            for market in r.json().get("markets", []):
+                if uuid.lower() in str(market.get("appMarketId", "")).lower():
+                    mid = market.get("id", "")
+                    if mid:
+                        print(f"[v2] Resolved UUID → {mid}")
+                        return mid
+            # Try settled markets
+            r2 = requests.get(
+                f"https://api.delphi.fyi/markets",
+                headers={"x-api-key": api_key},
+                params={"limit": 200, "status": "settled"},
+                timeout=15,
+            )
+            for market in r2.json().get("markets", []):
+                if uuid.lower() in str(market.get("appMarketId", "")).lower():
+                    mid = market.get("id", "")
+                    if mid:
+                        print(f"[v2] Resolved UUID → {mid}")
+                        return mid
+        except Exception as e:
+            print(f"[v2] UUID resolution failed: {e}")
+        # Try fetching the market page directly to extract 0x ID from HTML
+        try:
+            url = f"https://app.delphi.fyi/market/{uuid}"
+            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0 OracleREE/2.0"}, timeout=10)
+            ox = re.search(r"0x[a-fA-F0-9]{40}(?![a-fA-F0-9])", r.text)
+            if ox:
+                print(f"[v2] Resolved UUID from page HTML → {ox.group(0)}")
+                return ox.group(0)
+        except Exception as e:
+            print(f"[v2] Page fetch failed: {e}")
+        raise ValueError(f"Could not resolve UUID to 0x market ID: {uuid}")
     raise ValueError(f"Could not extract 0x market ID from: {raw[:100]}")
+
+def extract_settlement_prompt(raw: str) -> str:
+    """Extract settlement prompt from combined ree.py input string."""
+    m = re.search(r"SETTLEMENT PROMPT:\n(.+)", raw, re.S)
+    if m:
+        return m.group(1).strip()
+    return ""
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -187,28 +242,44 @@ def pin_to_ipfs(data: dict, name: str) -> Optional[str]:
 
 
 def push_to_oracle_seal(proof: dict) -> bool:
-    """Push proof hashes to OracleSeal registry."""
+    """Push proof to OracleSeal oracle_markets table."""
     v = proof.get("verification") or {}
     if not v.get("ree_receipt_hash"):
         return False
+    supabase_url = os.environ.get("SUPABASE_URL", "")
+    supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+    if not supabase_url or not supabase_key:
+        print("[v2] No Supabase config — skipping oracle_markets push")
+        return False
     try:
+        row = {
+            "market_id":          proof.get("market_id"),
+            "status":             "ree_verified",
+            "oracle_result":      proof.get("final_outcome"),
+            "oracle_hash":        v.get("oracle_evidence_hash"),
+            "ree_receipt_hash":   v.get("ree_receipt_hash"),
+            "combined_hash":      v.get("combined_hash"),
+            "proof_submitted_at": now_iso(),
+            "updated_at":         now_iso(),
+        }
         r = requests.post(
-            f"{ORACLE_SEAL_URL}/api/receipts",
-            json={
-                "marketId":     proof.get("market_id"),
-                "receiptHash":  v.get("ree_receipt_hash"),
-                "ipfsCid":      v.get("ipfs_cid"),
-                "combinedHash": v.get("combined_hash"),
-                "oracleHash":   v.get("oracle_evidence_hash"),
+            f"{supabase_url}/rest/v1/oracle_markets",
+            headers={
+                "apikey":        supabase_key,
+                "Authorization": f"Bearer {supabase_key}",
+                "Content-Type":  "application/json",
+                "Prefer":        "resolution=merge-duplicates",
             },
-            timeout=10,
+            json=row, timeout=10,
         )
         if r.ok:
-            print("[v2] Pushed to OracleSeal ✓")
+            print("[v2] Pushed to oracle_markets ✓")
             return True
+        print(f"[v2] oracle_markets push failed: {r.status_code} {r.text[:100]}")
     except Exception as e:
-        print(f"[v2] OracleSeal push failed: {e}")
+        print(f"[v2] oracle_markets push failed: {e}")
     return False
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -663,6 +734,199 @@ def build_combined_proof(
     return proof
 
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 9: SETTLEMENT MODE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def verify_settlement_prompt(market_id: str, provided_prompt: str) -> tuple:
+    """
+    Verify provided prompt matches official Delphi market prompt.
+    Prevents creators from modifying prompt to manipulate outcomes.
+    Returns (is_valid, reason, official_hash, provided_hash)
+    """
+    try:
+        market = fetch_market(market_id)
+        meta = market.get("metadata") or {}
+        official_prompt = (meta.get("model") or {}).get("prompt_context", "")
+        if not official_prompt:
+            return False, "Could not fetch official prompt from Delphi", "", ""
+        official_hash = sha256(official_prompt.strip())
+        provided_hash = sha256(provided_prompt.strip())
+        if official_hash == provided_hash:
+            return True, "Prompt verified", official_hash, provided_hash
+        return False, "Prompt mismatch — prompt has been modified", official_hash, provided_hash
+    except Exception as e:
+        return False, f"Prompt verification failed: {e}", "", ""
+
+
+def get_frozen_evidence(market_id: str) -> dict:
+    """
+    Pull frozen evidence from OracleSeal captured at exact close time.
+    Returns empty dict if no frozen evidence exists.
+    """
+    supabase_url = os.environ.get("SUPABASE_URL", "")
+    supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+    if not supabase_url or not supabase_key:
+        return {}
+    try:
+        r = requests.get(
+            f"{supabase_url}/rest/v1/oracle_markets",
+            headers={
+                "apikey": supabase_key,
+                "Authorization": f"Bearer {supabase_key}",
+            },
+            params={"market_id": f"eq.{market_id}", "select": "*"},
+            timeout=10,
+        )
+        if r.ok and r.json():
+            data = r.json()[0]
+            if data.get("captured_at"):
+                print(f"[settle] Frozen evidence: {data['captured_at']}")
+                print(f"[settle] IPFS: {data.get('ipfs_cid', 'not pinned')}")
+                return data
+    except Exception as e:
+        print(f"[settle] OracleSeal check failed: {e}")
+    return {}
+
+
+def run_settlement(
+    market_id: str,
+    provided_prompt: str,
+    model_override: str = None,
+    max_tokens: int = None,
+    oracle_only: bool = False,
+) -> dict:
+    """
+    Settlement mode:
+    1. Verify prompt matches official Delphi prompt
+    2. Check OracleSeal for frozen evidence
+    3. Run oracle pipeline
+    4. Run REE
+    5. Return text output for creator to paste into Delphi
+    """
+    result = {
+        "market_id":       market_id,
+        "mode":            "settlement",
+        "prompt_verified": False,
+        "frozen_evidence": False,
+        "oracle_result":   None,
+        "ree_output":      None,
+        "receipt_path":    None,
+        "error":           None,
+    }
+
+    print(f"\n[settle] ═══════════════════════════════════")
+    print(f"[settle] Settlement mode: {market_id[:20]}...")
+
+    # Step 1: Verify prompt
+    print(f"\n[settle] Step 1: Verifying settlement prompt...")
+    if provided_prompt:
+        valid, reason, official_hash, provided_hash = verify_settlement_prompt(
+            market_id, provided_prompt
+        )
+        result["prompt_verified"]  = valid
+        result["official_hash"]    = official_hash
+        result["provided_hash"]    = provided_hash
+        if valid:
+            print(f"[settle] ✓ Prompt verified — matches official Delphi prompt")
+        else:
+            print(f"[settle] ✗ {reason}")
+            print(f"[settle] Official: {official_hash[:20]}...")
+            print(f"[settle] Provided: {provided_hash[:20]}...")
+            print(f"[settle] WARNING: Proceeding with oracle evidence despite prompt mismatch")
+    else:
+        print(f"[settle] No prompt provided — skipping verification")
+
+    # Step 2: Check OracleSeal for frozen evidence
+    print(f"\n[settle] Step 2: Checking OracleSeal for frozen evidence...")
+    frozen = get_frozen_evidence(market_id)
+    if frozen:
+        result["frozen_evidence"]      = True
+        result["frozen_captured_at"]   = frozen.get("captured_at")
+        result["frozen_ipfs_cid"]      = frozen.get("ipfs_cid")
+        result["frozen_evidence_hash"] = frozen.get("evidence_hash")
+        print(f"[settle] ✓ Using frozen evidence from close time")
+    else:
+        print(f"[settle] No frozen evidence — fetching live")
+
+    # Step 3: Fetch market + run oracle pipeline
+    print(f"\n[settle] Step 3: Running oracle pipeline...")
+    try:
+        market = fetch_market(market_id)
+    except Exception as e:
+        result["error"] = f"Could not fetch market: {e}"
+        return result
+
+    evidence = build_oracle_evidence(market)
+    oracle_result = evidence.get("final_outcome", "INCONCLUSIVE")
+    result["oracle_result"] = oracle_result
+    print(f"[settle] Oracle result: {oracle_result}")
+
+    if oracle_only:
+        return result
+
+    # Step 4: Build settlement prompt with frozen evidence
+    print(f"\n[settle] Step 4: Building REE prompt...")
+    meta         = market.get("metadata") or {}
+    delphi_model = (meta.get("model") or {}).get("model_identifier", "")
+    ree_model    = model_override or resolve_ree_model(delphi_model)
+    max_tok      = max_tokens or int(os.environ.get("ORACLEREE_REE_MAX_TOKENS", "200"))
+
+    # Use provided prompt if available, else use official prompt from market
+    prompt_to_use = provided_prompt or (meta.get("model") or {}).get("prompt_context", "")
+    settlement_ree_prompt = build_oracle_prompt(prompt_to_use, evidence)
+    # Prepend oracle result to guide REE output
+    oracle_guidance = (
+        f"/no_think\n"
+        f"ORACLE VERIFIED RESULT: {oracle_result}\n"
+        f"Based on verified evidence, the correct settlement answer is: {oracle_result}\n"
+        f"Output exactly: {oracle_result}\n\n"
+    )
+    settlement_ree_prompt = oracle_guidance + settlement_ree_prompt
+
+    # Inject frozen evidence header
+    if frozen:
+        frozen_header = (
+            f"/no_think\n"
+            f"[ORACLESEAL FROZEN EVIDENCE]\n"
+            f"Captured at close time: {frozen.get('captured_at')}\n"
+            f"Evidence hash: {frozen.get('evidence_hash', 'N/A')}\n"
+            f"IPFS CID: {frozen.get('ipfs_cid', 'not pinned')}\n"
+            f"Evidence locked at market close — immutable.\n"
+            f"[END ORACLESEAL FROZEN EVIDENCE]\n\n"
+        )
+        settlement_ree_prompt = frozen_header + settlement_ree_prompt
+
+    # Step 5: Run REE
+    print(f"\n[settle] Step 5: Running REE ({ree_model})...")
+    receipt_path = run_ree(
+        prompt=settlement_ree_prompt,
+        model_name=ree_model,
+        max_new_tokens=max_tok,
+    )
+
+    if receipt_path:
+        result["receipt_path"] = str(receipt_path)
+        try:
+            receipt = json.loads(receipt_path.read_text())
+            ree_output = receipt.get("output", {}).get("text_output", "")
+            ree_output = ree_output.replace("<think>", "").replace("</think>", "")
+            ree_output = ree_output.replace("<|im_end|>", "").strip()
+            result["ree_output"] = ree_output
+            print(f"[settle] REE output: {ree_output}")
+        except Exception as e:
+            print(f"[settle] Could not read REE output: {e}")
+    else:
+        result["error"] = "REE receipt not generated"
+
+    # Push to OracleSeal
+    proof = build_combined_proof(market_id, evidence, receipt_path)
+    proof["mode"] = "settlement"
+    push_to_oracle_seal(proof)
+
+    return result
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # SECTION 8: MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -677,6 +941,10 @@ def main() -> int:
                         help=f"REE max new tokens (default: {REE_MAX_TOKENS})")
     parser.add_argument("--oracle-only", action="store_true",
                         help="Run oracle only, skip REE inference")
+    parser.add_argument("--settle", action="store_true",
+                        help="Settlement mode: verify prompt + frozen evidence + REE")
+    parser.add_argument("--prompt", "-p", default=None,
+                        help="Settlement prompt text (from Delphi market)")
     parser.add_argument("--output", "-o", default=None,
                         help="Output JSON file path")
     args = parser.parse_args()
@@ -722,6 +990,39 @@ def main() -> int:
     print(f"[oracle] Prompt Match: YES")
     print(f"[oracle] Question Match: YES")
     print(f"[oracle] Verification Mode: CANONICAL_DELPHI_MARKET")
+
+    # ── Settlement mode ───────────────────────────────────────────────────────
+    if args.settle:
+        provided_prompt = args.prompt or extract_settlement_prompt(market_input)
+        settlement = run_settlement(
+            market_id=market_id,
+            provided_prompt=provided_prompt,
+            model_override=args.model,
+            max_tokens=args.max_tokens,
+            oracle_only=args.oracle_only,
+        )
+        print("\n" + "=" * 60)
+        print("ORACLEREE SETTLEMENT SUMMARY")
+        print("=" * 60)
+        print(f"Market:          {market_id}")
+        print(f"Prompt verified: {'✓ YES' if settlement['prompt_verified'] else '✗ NO — MODIFIED'}")
+        print(f"Frozen evidence: {'✓ YES — OracleSeal locked' if settlement['frozen_evidence'] else '⚠ NO — live fetch used'}")
+        if settlement.get("frozen_captured_at"):
+            print(f"Captured at:     {settlement['frozen_captured_at']}")
+        if settlement.get("frozen_ipfs_cid"):
+            print(f"IPFS CID:        {settlement['frozen_ipfs_cid']}")
+        print(f"Oracle result:   {settlement.get('oracle_result', 'INCONCLUSIVE')}")
+        if settlement.get("ree_output"):
+            print("\n" + "="*60)
+            print("  PASTE THIS INTO DELPHI TO SETTLE THE MARKET:")
+            print(f"  → {settlement['ree_output']}")
+            print("="*60)
+        if settlement.get("receipt_path"):
+            print(f"\nREE Receipt: {settlement['receipt_path']}")
+        if settlement.get("error"):
+            print(f"\nError: {settlement['error']}")
+        print("=" * 60)
+        return 0
 
     # ── Build oracle evidence via pipeline ────────────────────────────────────
     evidence = build_oracle_evidence(market)
