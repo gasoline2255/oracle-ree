@@ -613,13 +613,13 @@ class TUI:
 
         market, err = self.fetch_market_by_ref_for_preflight(market_ref)
         if err or not market:
-            # In settle mode — pending markets may not be in API list
-            # Pass URL directly to oracle_ree.py which handles resolution
             if self.settle_mode:
+                # Pending markets not in API — pass directly to oracle_ree.py
                 self.preflight_market_id = ""
                 self.resolved_market_id = market_ref
                 self.market_data = {}
-                return True, "Settle mode: passing market reference directly to oracle"
+                # Extract prompt verification will happen in oracle_ree.py
+                return True, ""
             self.active_input_field = "market"
             return False, "INPUT ERROR: " + (err or "Could not resolve market")
 
