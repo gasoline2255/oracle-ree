@@ -267,6 +267,7 @@ def push_to_oracle_seal(proof: dict) -> bool:
             "status":             "ree_verified",
             "oracle_result":      proof.get("final_outcome"),
             "oracle_hash":        v.get("oracle_evidence_hash"),
+            "ipfs_cid":           v.get("ipfs_cid") or "",
             "ree_receipt_hash":   v.get("ree_receipt_hash"),
             "combined_hash":      v.get("combined_hash"),
             "proof_submitted_at": now_iso(),
