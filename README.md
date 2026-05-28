@@ -1,106 +1,251 @@
-# Gensyn Reproducible Execution Environment (REE)
+# 🔒 OracleREE
 
-This repo holds scripts which allow users to interact with the Gensyn Reproducible Execution Environment (REE) as a Docker container. REE enables fully reproducible execution of machine-learning workloads. Note that this current release is constrained to reproducible inference of LLMs.
+**Trustless settlement verification and deterministic evidence infrastructure for [Gensyn Delphi](https://app.delphi.fyi) information markets**
 
-We provide an overview of REE at https://gensyn.ai/ree and full documentation at https://docs.gensyn.ai/tech/ree.
+OracleREE and OracleSeal work together to make Delphi market settlement more transparent, reproducible, and independently auditable.
 
-## Licensing
-This repository provides access to both open-source and proprietary components.
+Delphi markets already let creators configure settlement prompts, approved data sources, and AI-based settlement logic at market creation. The remaining challenge is verification: participants need a way to confirm that the correct prompt was used, the correct sources were followed, the right evidence was captured, and the final outcome was resolved correctly.
 
-The REE SDK source code, and any other files expressly identified as MIT-licensed, are licensed under the MIT License in the [REE-SDK-License file](./REE-SDK-License).
+OracleREE handles settlement verification and reproducible inference.
+OracleSeal handles close-time evidence capture and public settlement transparency.
 
-The REE compiler binary and the REE reproducible-operators binary, as included in any Docker image, release artifact, or other binary distribution are **not** licensed under the MIT License. Those proprietary components are licensed under the REE Binary License Agreement in the [REE-Binary-License file](./REE-Binary-License). This is also visible by pressing `l` in the provided TUI.
+Together, they reduce trust in the market creator and make settlement provable instead of purely trust-based.
 
-By downloading, pulling, installing, accessing, or using the proprietary REE binaries or any Docker image or release artifact containing them, you agree to the REE Binary License Agreement.
+---
 
+# Quick Start
 
-# Requirements
+## OracleSeal Dashboard
 
-## CUDA Driver (GPU execution)
+**Dashboard:** https://oracle-seal.vercel.app
 
-GPU-accelerated inference requires a sufficiently recent NVIDIA driver. The minimum supported versions are:
+View captured markets, frozen evidence, IPFS proofs, and REE verification status.
 
-| Platform | Minimum driver version |
-|---|---|
-| Linux | 570.00 |
-| Windows | 572.16 |
+---
 
-To check your installed driver version, run `nvidia-smi`. If your driver is older than the minimum, please update it from the [NVIDIA Driver Downloads](https://www.nvidia.com/Download/index.aspx) page before running REE.
+## Run OracleREE
 
-> **CPU-only fallback:** If no compatible GPU or driver is present, REE can run in CPU-only mode by passing `--cpu-only` to `ree.sh`. Expect significantly slower inference.
-
-## Docker
-
-REE runs inside a Docker container. Please install and configure Docker for your system before proceeding.
-
-> **Docker Desktop memory limit:** Docker Desktop defaults to 8 GB of memory, which may not be enough for larger models. If you encounter exit code 137 (out of memory) errors, increase the memory allocation to accommodate your model size under [Docker Desktop > Settings > Resources > Advanced > Memory](https://docs.docker.com/desktop/settings-and-maintenance/settings/#advanced).
-
-# Getting Started
-
-To get started with REE, clone this repository:
-
-```
-git clone https://github.com/gensyn-ai/ree.git
-cd ree
-```
-
-We provide two scripts for running REE: `ree.py` and `ree.sh`. We expect most users to use `ree.py`, which provides a more user-friendly interface. The `ree.sh` script is a lower-level interface that may be useful for debugging or advanced use cases (and is called by `ree.py`).
-
-To get started, simply run `ree.py` using Python:
-
-```
+```bash
+git clone https://github.com/gasoline2255/oracle-ree.git
+cd oracle-ree
 python3 ree.py
 ```
 
-This will drop you into a Terminal User Interface (TUI) where you can select a model to run, provide a prompt, and run reproducible inference. For long prompts, we recommend using a prompt file and providing that to the TUI in the appropriate field. The prompt file must be in JSONLines format, where each line is either a string or an object with a `prompt` field containing the string prompt. For example:
+---
 
+# The Problem
+
+## What Delphi Provides
+
+✅ Market creators configure settlement prompts and approved data sources at market creation
+
+✅ Markets support both verifiable and non-verifiable settlement models
+
+✅ Creators execute settlement at close time and submit the result to Delphi
+
+✅ Creator prompts and approved sources are locked at market creation
+
+---
+
+## What's Missing
+
+❌ No way to verify whether the submitted settlement prompt matches the originally locked prompt
+
+❌ No way to verify whether settlement used the originally approved data sources
+
+❌ No independent verification for most non-verifiable model settlements
+
+❌ No protection against mutable external data updating after market close
+
+❌ No publicly auditable record of what evidence existed at the exact close timestamp
+
+---
+
+## Result
+
+Settlement becomes a black box for most markets.
+
+Participants cannot independently verify:
+
+* which settlement prompt was executed
+* which evidence sources were used
+* what data existed at close time
+* whether the final outcome was resolved correctly
+
+OracleREE and OracleSeal solve this by combining frozen evidence snapshots, source-locked verification, prompt integrity checks, and reproducible settlement execution.
+
+---
+
+# The Solution
+
+## OracleREE
+
+OracleREE is the settlement verification engine.
+
+It verifies that settlement follows the original market configuration and produces a reproducible proof of the result.
+
+OracleREE verifies:
+
+* the market URL
+* the official settlement prompt
+* the creator-approved data sources
+* the resolved market outcome
+* the REE execution receipt
+
+To run settlement verification, users provide the market URL and settlement prompt. OracleREE checks that they match the configuration locked when the market was created.
+
+```text
+Market verified: ✓
+Settlement prompt verified: ✓
+Locked sources verified: ✓
 ```
-"What is the capital of France?"
-{"prompt": "What is the largest mammal?"}
+
+If the prompt or approved sources do not match, verification fails before settlement execution continues.
+
+---
+
+## OracleSeal
+
+OracleSeal is the evidence capture and transparency layer.
+
+It watches Delphi markets and captures evidence from creator-approved sources at the exact market close timestamp.
+
+Captured evidence is:
+
+* timestamped
+* hashed
+* pinned to IPFS
+* stored before settlement execution
+* displayed publicly on the OracleSeal dashboard
+
+This allows OracleREE to verify settlement using frozen close-time evidence instead of mutable live data.
+
+---
+
+# How It Works
+
+```text
+Market closes
+    │
+    ├── OracleSeal watcher captures evidence
+    │   from creator-approved sources
+    │
+    ├── Evidence is timestamped, hashed, and pinned to IPFS
+    │
+    └── oracle_ree.py runs
+        ├── Verifies the locked market configuration
+        ├── Loads frozen evidence from OracleSeal
+        ├── Runs classify → fetch → extract → resolve
+        ├── Executes settlement through REE
+        └── Generates a cryptographic receipt
 ```
 
-Note that the `Prompt Text` and `Prompt File` fields are mutually exclusive.
+---
 
-## Executing a Model using REE
+# Verification Modes
 
-Once REE is running, you will be presented with a TUI that allows you to select a model, provide a prompt, and run inference. The TUI will guide you through the process and provide options for configuring the inference run. After the run is complete, REE will generate a receipt that contains all of the information about the run, including the model used, the prompt, the output, and all of the metadata needed to reproduce the run. The `Model Name` refers to a HuggingFace model identifier, such as `Qwen/Qwen3-8B`. The `Prompt` is the text input that you want to provide to the model for inference. You can either type this directly into the TUI or provide a file containing the prompt.
+## [1] OracleREE Proof
 
-For a list of available models, please see our [documentation](https://docs.gensyn.ai/tech/ree/supported-models). Note that this list is non-exhaustive: any HuggingFace model that is compatible with our system may be used. If you have a specific model in mind that is not on our list, please file an issue and we will do our best to support it.
+Used to verify whether a market was settled correctly.
 
-### Receipts
+```text
+Prompt verified: ✓
+Locked sources verified: ✓
 
-Executing a model using REE produces two outputs: the inference output (i.e., the text generated by the model), and a receipt. The receipt is a JSON file that contains all of the information about the run, including the model used, the prompt, the output, and all of the metadata needed to reproduce the run. The receipt is designed to be shared with others, who can then use it to verify that they can reproduce the same output using REE. We recommend sharing receipts alongside any claims about model behavior, so that others can verify those claims for themselves.
+Oracle result:   Outcome A
+Creator result:  Outcome A
 
-### Subcommands
+MATCH ✓
+```
 
-REE provides a number of subcommands for fine-grained use cases, though most users will only need to use two subcommands: `run`, and `verify`.
+```text
+Prompt verified: ✓
+Locked sources verified: ✓
 
-#### `run`
+Oracle result:   Outcome A
+Creator result:  Outcome B
 
-The `run` subcommand will, as the name suggests, run a single inference workload for the specified model and generate a receipt. This involves the following steps:
+MISMATCH ✗
+```
 
-1. Download the REE image (if not already present locally -- note that this make take several minutes the first time you run it).
-2. Spin up the REE container.
-3. Run the inference workload inside the container using the provided configuration. This will also generate the receipt file.
+---
 
-#### `verify` (and `validate`)
+## [2] Settle Market
 
-The `verify` subcommand takes as input a receipt file and will then invoke REE to verify that the receipt is valid. This is useful for users who have received a receipt from another user and want to verify it, or for users who have generated a receipt and want to verify it before sharing it with others.
+Used by market creators to generate a verified settlement result before submitting the outcome to Delphi.
 
-The `validate` subcommand validates that a given receipt is properly structured and internally consistent (i.e., the hashes given in the receipt match the actual hashes of the contents). This is a less stringent check than `verify`, which actually re-runs the inference and checks that the output matches the receipt, and is useful for users who want to check that a receipt is well-formed before attempting to verify it. Note that `verify` will automatically perform validation as part of its process.
+```text
+Prompt verified: ✓
+Frozen evidence: ✓
+REE receipt: ✓
 
-# Patch Notes
+Settlement result:
+→ Outcome A
+```
 
-## 15 May 2026
+---
 
-- Updated REE image to v0.3.0.
-- REE SDK now supports (basic) tool calls.
-- REE SDK now has an `InferenceSession` class capable of managing the entire lifecycle of an inference session, including setup, execution, and teardown. This allows users to run multiple inference sessions within the same container instance, without needing to re-run setup steps or re-instantiate the compiler.
-- Compile-time overhead reduced by 50% for most models.
+# OracleSeal Dashboard
 
-## 20 April 2026
+OracleSeal provides a public view of captured markets, frozen evidence, and REE verification status.
 
-- Updated REE image to v0.2.0.
-- Reproducible performance overhead reduced by 3x.
-- Deterministic and non-deterministic (default) performance overhead reduced by 1.5-2x.
-- Implemented pipeline parallelism to enable larger models (up to 72B). Available via the `--n-partitions` flag in REE.
+## Market Statuses
+
+| Status         | Description                                       |
+| -------------- | ------------------------------------------------- |
+| `OPEN`         | Market is active                                  |
+| `CAPTURED`     | Evidence was frozen at close time                 |
+| `REE VERIFIED` | Settlement proof was generated                    |
+| `INCONCLUSIVE` | Evidence was unavailable or could not be resolved |
+
+---
+
+## Stored Settlement Artifacts
+
+OracleSeal stores:
+
+* evidence snapshots
+* capture timestamps
+* evidence hashes
+* IPFS CIDs
+* oracle outputs
+* REE receipt hashes
+
+These artifacts allow anyone to inspect what evidence existed at market close and how the settlement result was produced.
+
+---
+
+# Why Frozen Evidence Matters
+
+Settlement should use the data that existed at the actual market close timestamp.
+
+Some external data providers can revise or update historical values after a market closes. Without close-time evidence capture, a market may settle against data that did not exist when trading ended.
+
+OracleSeal prevents this by freezing evidence before settlement execution.
+
+This creates:
+
+* deterministic settlement inputs
+* immutable settlement evidence
+* reproducible verification
+* transparent auditability
+
+---
+
+# Oracle Pipeline
+
+```text
+classify → fetch → extract → resolve
+```
+
+---
+
+# Links
+
+* **OracleSeal Dashboard:** https://oracle-seal.vercel.app
+* **Gensyn Delphi:** https://app.delphi.fyi
+* **Twitter/X:** https://x.com/gasoline2255
+
+---
+
+**Built by [gasoline](https://x.com/gasoline2255)** | **Gensyn community** | **Built on [Gensyn REE](https://gensyn.ai/ree)**
