@@ -168,6 +168,22 @@ def extract_market_id(raw: str) -> str:
                         return mid
         except Exception as e:
             print(f"[v2] UUID resolution failed: {e}")
+        # Try Xavier's endpoint: POST /api/v2/markets/get
+        for app_url in ["https://app.delphi.fyi", "https://testnet.delphi.fyi"]:
+            try:
+                r3 = requests.post(
+                    f"{app_url}/api/v2/markets/get",
+                    json={"json": {"id": uuid}},
+                    headers={"Content-Type": "application/json"},
+                    timeout=10,
+                )
+                if r3.ok:
+                    addr = r3.json().get("json", {}).get("address", "")
+                    if addr and addr.startswith("0x"):
+                        print(f"[v2] Resolved UUID via /api/v2/markets/get → {addr}")
+                        return addr
+            except Exception as e:
+                print(f"[v2] /api/v2/markets/get failed ({app_url}): {e}")
         # Try fetching the market page directly to extract 0x ID from HTML
         try:
             url = f"https://app.delphi.fyi/market/{uuid}"
