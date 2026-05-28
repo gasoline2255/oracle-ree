@@ -231,11 +231,21 @@ def pin_to_ipfs(data: dict, name: str) -> Optional[str]:
             "https://uploads.pinata.cloud/v3/files",
             headers={"Authorization": f"Bearer {PINATA_JWT}"},
             files={"file": (f"{name}.json", json.dumps(data), "application/json")},
+            data={"network": "public"},
             timeout=30,
         )
-        cid = r.json()["data"]["cid"]
-        print(f"[v2] IPFS pinned: {cid}")
-        return cid
+        print(f"[v2] Pinata response: {r.status_code} {r.text[:300]}")
+        resp = r.json()
+        cid = (
+            resp.get("data", {}).get("cid") or
+            resp.get("IpfsHash") or
+            resp.get("cid")
+        )
+        if cid:
+            print(f"[v2] IPFS pinned: {cid}")
+            return cid
+        print(f"[v2] IPFS pin failed — no CID in response")
+        return None
     except Exception as e:
         print(f"[v2] IPFS pin failed: {e}")
         return None
