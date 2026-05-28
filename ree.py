@@ -524,6 +524,25 @@ class TUI:
         if not api_key:
             return None, "DELPHI_API_ACCESS_KEY is missing"
 
+        # Try Xavier's endpoint first — works for pending/closed markets
+        import requests as _req
+        for _app_url in ["https://app.delphi.fyi", "https://testnet.delphi.fyi"]:
+            try:
+                _r = _req.post(
+                    f"{_app_url}/api/v2/markets/get",
+                    json={"json": {"id": uuid}},
+                    headers={"Content-Type": "application/json"},
+                    timeout=10,
+                )
+                if _r.ok:
+                    _addr = _r.json().get("json", {}).get("address", "")
+                    if _addr and _addr.startswith("0x"):
+                        _data = fetch_market_info(_addr)
+                        if _data:
+                            return _data, ""
+            except Exception:
+                pass
+
         page_question = ""
         url = market_ref if market_ref.startswith("http") else f"https://app.delphi.fyi/market/{uuid}"
         html = ""
