@@ -952,6 +952,15 @@ def run_settlement(
     proof["mode"] = "settlement"
     push_to_oracle_seal(proof)
 
+    # Save proof file to disk so TUI can display REE receipt hash and combined hash
+    from datetime import datetime
+    from pathlib import Path
+    proof_path = Path(__file__).parent / f"oracle_proof_{market_id[:10]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    with open(proof_path, "w", encoding="utf-8") as f:
+        import json as _json
+        _json.dump(proof, f, indent=2, ensure_ascii=False)
+    print(f"\n[proof] Saved: {proof_path}")
+
     return result
 
 # ═══════════════════════════════════════════════════════════════════════════════

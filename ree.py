@@ -982,7 +982,7 @@ class TUI:
 
         keys = [
             "oracle hash", "evidence hash", "oracle evidence hash", "ipfs cid",
-            "ree receipt", "ree receipt hash", "combined hash", "saved to", "saved file",
+            "ree receipt", "ree receipt hash", "combined hash", "saved to", "saved file", "saved:",
             "verification passed", "market:", "question:", "delphi model:", "event verdict", "price verdict",
             "prompt source:", "prompt match:", "question match:", "verification mode:",
             "official prompt hash:", "provided prompt hash:", "prompt warning:", "error"
@@ -2707,7 +2707,7 @@ class TUI:
                     "ree": "Run Gensyn REE inference", "receipt": "Generate combined proof", "done": "Done",
                 }.get(key, label)
             self.put(stdscr, icon_y, col_x, marker, attr | curses.A_BOLD)
-            self.put(stdscr, label_y, col_x, label[:col_w - 1], attr)
+            self.put(stdscr, label_y, col_x, label[:col_w - 1].ljust(col_w - 1), attr)
         if self.mode == "running":
             spinner = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[int(time.time() * 8) % 10]
             running = f"{spinner} RUNNING {pct}%"
