@@ -133,7 +133,7 @@ def _analyse_outcomes(outcomes: list) -> dict:
 
     spread_re = re.compile(r"^.+?\s+[+-]\d+(?:\.\d+)?\s*$")
     price_re = re.compile(r"[\$\d][\d,k.]+[kmb]?\+?$|below|above|over|under", re.I)
-    count_re = re.compile(r"^(?:over|under|above|below)\s+\d+(?:\.\d+)?$", re.I)
+    count_re = re.compile(r"^(?:over|under|above|below)\s+\d+(?:\.\d+)?(?:\s+\w+)*$", re.I)
 
     for o in outcomes:
         s = str(o or "").strip().lower()

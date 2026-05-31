@@ -226,6 +226,8 @@ def run_pipeline(
             confirmation_action=mc.confirmation_action,
             window_start=mc.window_start,
             window_end=mc.window_end,
+            prompt_context=prompt_context,
+            event_date=mc.event_date or event_date,
         )
         result.extracted_fact = fact
         if debug:

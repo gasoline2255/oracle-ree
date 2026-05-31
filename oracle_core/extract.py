@@ -255,6 +255,7 @@ def extract_price_value(
     asset: str,
     metric: str = "high",
     prompt_context: str = "",
+    event_date: str = "",
 ) -> ExtractedFact:
     """
     Extract a price value from content.
@@ -280,6 +281,29 @@ def extract_price_value(
             fact.confidence = "high"
             fact.source     = "coingecko_json"
             return fact
+        # ORNN API: {"success": true, "data": [{"timestamp": "...", "index_value": 3.45}]}
+        if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
+            from datetime import datetime, timezone
+            import re as _re
+            # Extract target date from question
+            date_m = _re.search(r"(\d{1,2})(?:st|nd|rd|th)?\s+(january|february|march|april|may|june|july|august|september|october|november|december)|(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:st|nd|rd|th)?", content.lower() + " " + asset.lower())
+            entries = data["data"]
+            if entries:
+                # Find entry closest to close time or just use last entry
+                best = entries[-1]
+                if event_date:
+                    for entry in entries:
+                        ts = str(entry.get("timestamp", ""))
+                        if event_date in ts:
+                            best = entry
+                            break
+                val = best.get("index_value") or best.get("value") or best.get("price")
+                if val is not None:
+                    fact.value      = str(val)
+                    fact.confidence = "high"
+                    fact.source     = "ornn_api_json"
+                    fact.reasoning  = f"extracted index_value from ORNN API data array"
+                    return fact
     except Exception:
         pass
 
@@ -337,6 +361,7 @@ def extract_confirmation(
         "- The ANSWER line is Tavily's synthesis — it can be WRONG. Always check the actual article content below it.\n"
         "- If any article URL or content mentions the event occurring in the window, return 'Yes'.\n"
         "- Return 'Yes' if you find ANY clear evidence the event occurred in the window.\n"
+        "- CRITICAL: A failed attempt does NOT count as the event occurring. 'Attempted but failed', 'attempt was unsuccessful', 'did not complete' = No.\n"
         "- Return 'No' ONLY if multiple sources explicitly confirm the event did NOT occur.\n"
         "- Return 'Unknown' if content is unclear or contradictory.\n"
         "- 'Unknown' is NOT the same as 'No'. Absence of evidence ≠ No.\n"
@@ -494,6 +519,7 @@ def extract_fact(
     window_start: str = "",
     window_end: str = "",
     prompt_context: str = "",   # ← settlement prompt, passed to every LLM call
+    event_date: str = "",
 ) -> ExtractedFact:
     """
     Main entry point. Routes to the right extractor based on extract_method.
@@ -519,6 +545,7 @@ def extract_fact(
             return extract_price_value(
                 content, question, asset, metric,
                 prompt_context=prompt_context,
+                event_date=event_date,
             )
 
         if extract_method == "llm_confirmation":

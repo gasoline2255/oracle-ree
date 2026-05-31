@@ -306,12 +306,44 @@ def match_to_outcome(
             return os_
 
     # Pass 2: fuzzy team match
+    # Skip fuzzy match for date-based outcomes (before/after)
+    has_date_outcomes = any(
+        any(k in str(o).lower() for k in ["or before", "or after", "or later", "or earlier"])
+        for o in (outcomes or [])
+    )
+    if not has_date_outcomes:
+        for o in outcomes or []:
+            os_ = str(o).strip()
+            if os_.lower() in {"yes", "no", "draw"}:
+                continue
+            if _fuzzy_team_match(value, os_):
+                print(f"[match] Fuzzy: {value} → {o}")
+                return os_
+
+    # Pass 2.5: Before/after date outcome matching
+    # Example: "after May 27, 2026" → "May 27th or after"
+    value_lower = value.lower()
     for o in outcomes or []:
         os_ = str(o).strip()
-        if os_.lower() in {"yes", "no", "draw"}:
-            continue
-        if _fuzzy_team_match(value, os_):
-            print(f"[match] Fuzzy: {value} → {o}")
+        os_lower = os_.lower()
+        if any(k in os_lower for k in ["or after", "or later", "after"]) and any(k in value_lower for k in ["after", "or later", "or after"]):
+            print(f"[match] Date after: {value} → {os_}")
+            return os_
+        if any(k in os_lower for k in ["or before", "or earlier", "before"]) and any(k in value_lower for k in ["before", "or earlier", "or before"]):
+            print(f"[match] Date before: {value} → {os_}")
+            return os_
+
+    # Pass 2.5: Before/after date outcome matching
+    # Example: "after May 27, 2026" → "May 27th or after"
+    value_lower = value.lower()
+    for o in outcomes or []:
+        os_ = str(o).strip()
+        os_lower = os_.lower()
+        if any(k in os_lower for k in ["or after", "or later", "after"]) and any(k in value_lower for k in ["after", "or later", "or after"]):
+            print(f"[match] Date after: {value} → {os_}")
+            return os_
+        if any(k in os_lower for k in ["or before", "or earlier", "before"]) and any(k in value_lower for k in ["before", "or earlier", "or before"]):
+            print(f"[match] Date before: {value} → {os_}")
             return os_
 
     # Pass 3: Ollama alias resolver (last resort)
