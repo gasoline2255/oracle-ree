@@ -3069,7 +3069,10 @@ class TUI:
                 elif key == "e" or key == ord("e"):
                     self.reset()
                 elif key == "r" or key == ord("r"):
+                    # preserve settle_mode on rerun
+                    was_settle = self.settle_mode
                     self.start_run()
+                    self.settle_mode = was_settle
 
 
 def main() -> int:

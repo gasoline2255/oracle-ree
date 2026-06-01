@@ -238,7 +238,14 @@ def match_to_outcome(
                     target = "Yes" if condition_met else "No"
 
                     for o in outcomes or []:
-                        if str(o).strip().lower() == target.lower():
+                        o_norm = str(o).strip().lower()
+                        if condition_met and o_norm in {"above", "above "}:
+                            print(f"[match] Threshold Above: ${price_value:,.2f} {comparator} ${threshold:,.2f} → {o}")
+                            return str(o).strip()
+                        if not condition_met and o_norm in {"below", "below "}:
+                            print(f"[match] Threshold Below: ${price_value:,.2f} {comparator} ${threshold:,.2f} → {o}")
+                            return str(o).strip()
+                        if o_norm == target.lower():
                             print(
                                 f"[match] Threshold: ${price_value:,.2f} "
                                 f"{comparator} ${threshold:,.2f} → {o}"

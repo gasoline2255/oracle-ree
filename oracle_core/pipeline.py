@@ -122,6 +122,18 @@ def run_pipeline(
                 "coingecko": "https://www.coingecko.com/",
                 "yahoo": "https://finance.yahoo.com/",
                 "strategy.com": "https://www.strategy.com/purchases",
+                "the block": "https://www.theblock.co/",
+                "coindesk": "https://www.coindesk.com/",
+                "decrypt": "https://decrypt.co/",
+                "cointelegraph": "https://cointelegraph.com/",
+                "bloomberg": "https://www.bloomberg.com/",
+                "reuters": "https://www.reuters.com/",
+                "cnn": "https://www.cnn.com/",
+                "cnbc": "https://www.cnbc.com/",
+                "bbc": "https://www.bbc.com/",
+                "x (twitter)": "https://x.com/",
+                "x": "https://x.com/",
+                "twitter": "https://x.com/",
             }
             source_url = source_map.get(first_source.lower(), f"https://{first_source}")
 
@@ -161,7 +173,7 @@ def run_pipeline(
     # ── Step 2: Fetch ─────────────────────────────────────────────────────────
     try:
         fetch_result = fetch_source(
-            source_url=source_url or "https://www.espn.com/",
+            source_url=source_url or "",
             query=question,
             event_date=mc.event_date or event_date,
             market_category=mc.category,
