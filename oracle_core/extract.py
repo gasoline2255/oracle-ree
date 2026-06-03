@@ -122,7 +122,11 @@ def _call_ollama(prompt: str, max_tokens: int = 400) -> Optional[dict]:
         r.raise_for_status()
         raw = r.json().get("response", "{}")
         raw = re.sub(r"```json|```", "", raw).strip()
-        return json.loads(raw)
+        result = json.loads(raw)
+        # If Ollama returns answer without confidence, default to medium
+        if isinstance(result, dict) and result.get("answer") and not result.get("confidence"):
+            result["confidence"] = "medium"
+        return result
     except Exception as e:
         print(f"[extract] Ollama failed: {e}")
         return None
